@@ -4,7 +4,6 @@ import com.g1739.immersiveaircraftcruise.CruiseItems;
 import com.g1739.immersiveaircraftcruise.cruise.CruiseController;
 import com.g1739.immersiveaircraftcruise.cruise.CruiseModuleData;
 import com.g1739.immersiveaircraftcruise.cruise.CruiseRoute;
-import com.g1739.immersiveaircraftcruise.cruise.CruiseVehicleAccess;
 import immersive_aircraft.entity.VehicleEntity;
 import net.minecraft.network.FriendlyByteBuf;
 import net.minecraft.server.level.ServerPlayer;
@@ -45,14 +44,16 @@ public record UpdateCruiseHudPacket(int entityId, RouteStorageTarget target, boo
             }
 
             Entity entity = player.level().getEntity(packet.entityId);
-            if (entity instanceof VehicleEntity vehicle && vehicle.hasPassenger(player) && vehicle instanceof CruiseVehicleAccess access) {
+            if (entity instanceof VehicleEntity vehicle && vehicle.hasPassenger(player)) {
                 if (!CruiseController.hasCruiseModule(vehicle)) {
                     return;
                 }
-                CruiseRoute route = CruiseModuleData.read(vehicle);
+                CruiseRoute route = CruiseController.currentRoute(vehicle).copy();
                 route.setHudEnabled(packet.hudEnabled);
                 CruiseModuleData.write(vehicle, route);
-                access.iacruise$setRoute(route.copy());
+                if (vehicle instanceof com.g1739.immersiveaircraftcruise.cruise.CruiseVehicleAccess access) {
+                    access.iacruise$setRoute(route.copy());
+                }
             }
         });
         context.setPacketHandled(true);

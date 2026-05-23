@@ -6,7 +6,7 @@ import net.minecraftforge.network.NetworkRegistry;
 import net.minecraftforge.network.simple.SimpleChannel;
 
 public final class CruiseNetwork {
-    private static final String PROTOCOL_VERSION = "3";
+    private static final String PROTOCOL_VERSION = "7";
     public static final SimpleChannel CHANNEL = NetworkRegistry.newSimpleChannel(
             new ResourceLocation(ImmersiveAircraftCruise.MOD_ID, "main"),
             () -> PROTOCOL_VERSION,
@@ -36,6 +36,10 @@ public final class CruiseNetwork {
                 ToggleCruiseNavigationPacket::encode,
                 ToggleCruiseNavigationPacket::decode,
                 ToggleCruiseNavigationPacket::handle);
+        CHANNEL.registerMessage(id++, StopCruiseNavigationPacket.class,
+                StopCruiseNavigationPacket::encode,
+                StopCruiseNavigationPacket::decode,
+                StopCruiseNavigationPacket::handle);
         CHANNEL.registerMessage(id++, UpdateCruiseRoutePacket.class,
                 UpdateCruiseRoutePacket::encode,
                 UpdateCruiseRoutePacket::decode,

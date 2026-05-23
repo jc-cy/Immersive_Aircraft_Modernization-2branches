@@ -34,11 +34,6 @@ public abstract class VehicleEntityMixin implements CruiseVehicleAccess {
     }
 
     @Override
-    public void iacruise$refreshRouteFromModule() {
-        immersive_aircraft_cruise$route = CruiseModuleData.read((VehicleEntity) (Object) this);
-    }
-
-    @Override
     public boolean iacruise$isBoosting() {
         return immersive_aircraft_cruise$boosting;
     }
@@ -52,6 +47,11 @@ public abstract class VehicleEntityMixin implements CruiseVehicleAccess {
     @Inject(method = {"tick", "m_8119_"}, at = @At(value = "INVOKE", target = "Limmersive_aircraft/entity/VehicleEntity;updateVelocity()V"), remap = false)
     private void immersive_aircraft_cruise$beforeControlledVelocity(CallbackInfo ci) {
         CruiseController.tick((VehicleEntity) (Object) this, movementY < -0.01f);
+    }
+
+    @Inject(method = {"tick", "m_8119_"}, at = @At("TAIL"), remap = false)
+    private void immersive_aircraft_cruise$afterTick(CallbackInfo ci) {
+        CruiseController.serverProgressTick((VehicleEntity) (Object) this);
     }
 
     @Inject(method = {"tick", "m_8119_"}, at = @At(value = "INVOKE", target = "Limmersive_aircraft/entity/VehicleEntity;updateController()V"), remap = false)

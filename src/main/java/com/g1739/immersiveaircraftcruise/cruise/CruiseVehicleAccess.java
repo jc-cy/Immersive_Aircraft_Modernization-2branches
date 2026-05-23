@@ -5,9 +5,6 @@ public interface CruiseVehicleAccess {
 
     void iacruise$setRoute(CruiseRoute route);
 
-    default void iacruise$refreshRouteFromModule() {
-    }
-
     boolean iacruise$isBoosting();
 
     void iacruise$setBoosting(boolean boosting);

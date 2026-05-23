@@ -52,18 +52,43 @@ public final class CruiseModuleData {
     }
 
     public static boolean write(VehicleEntity vehicle, CruiseRoute route) {
-        Optional<ItemStack> stack = findModule(vehicle);
-        stack.ifPresent(itemStack -> write(itemStack, route));
-        return stack.isPresent();
+        if (!(vehicle instanceof InventoryVehicleEntity inventoryVehicle)) {
+            return false;
+        }
+        for (SlotDescription slot : inventoryVehicle.getInventoryDescription().getSlots(VehicleInventoryDescription.UPGRADE)) {
+            ItemStack stack = inventoryVehicle.getInventory().getItem(slot.index());
+            if (stack.is(CruiseItems.CRUISE_MODULE.get())) {
+                write(stack, route);
+                inventoryVehicle.getInventory().setItem(slot.index(), stack);
+                return true;
+            }
+        }
+        return false;
     }
 
     public static void setBoosting(VehicleEntity vehicle, boolean boosting) {
-        findModule(vehicle).ifPresent(stack -> {
-            if (boosting) {
-                stack.getOrCreateTag().putBoolean(BOOSTING_TAG, true);
-            } else if (stack.hasTag()) {
-                stack.getTag().remove(BOOSTING_TAG);
+        if (!(vehicle instanceof InventoryVehicleEntity inventoryVehicle)) {
+            return;
+        }
+        for (SlotDescription slot : inventoryVehicle.getInventoryDescription().getSlots(VehicleInventoryDescription.UPGRADE)) {
+            ItemStack stack = inventoryVehicle.getInventory().getItem(slot.index());
+            if (!stack.is(CruiseItems.CRUISE_MODULE.get())) {
+                continue;
             }
-        });
+            boolean changed = false;
+            if (boosting) {
+                if (!stack.getOrCreateTag().getBoolean(BOOSTING_TAG)) {
+                    stack.getOrCreateTag().putBoolean(BOOSTING_TAG, true);
+                    changed = true;
+                }
+            } else if (stack.hasTag() && stack.getTag().contains(BOOSTING_TAG)) {
+                stack.getTag().remove(BOOSTING_TAG);
+                changed = true;
+            }
+            if (changed) {
+                inventoryVehicle.getInventory().setItem(slot.index(), stack);
+            }
+            return;
+        }
     }
 }

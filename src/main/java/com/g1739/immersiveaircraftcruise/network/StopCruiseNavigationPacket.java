@@ -13,18 +13,14 @@ import net.minecraftforge.network.PacketDistributor;
 
 import java.util.function.Supplier;
 
-public class ToggleCruiseNavigationPacket {
+public class StopCruiseNavigationPacket {
     private final int entityId;
     private final int selectedRoute;
     private final int currentIndex;
     private final boolean holdingPattern;
     private final CruiseRoute.Waypoint startPoint;
 
-    public ToggleCruiseNavigationPacket() {
-        this(-1, -1, -1, false, null);
-    }
-
-    public ToggleCruiseNavigationPacket(int entityId, CruiseRoute route) {
+    public StopCruiseNavigationPacket(int entityId, CruiseRoute route) {
         this(
                 entityId,
                 route == null ? -1 : route.getSelectedRoute(),
@@ -34,7 +30,7 @@ public class ToggleCruiseNavigationPacket {
         );
     }
 
-    private ToggleCruiseNavigationPacket(int entityId, int selectedRoute, int currentIndex, boolean holdingPattern, CruiseRoute.Waypoint startPoint) {
+    private StopCruiseNavigationPacket(int entityId, int selectedRoute, int currentIndex, boolean holdingPattern, CruiseRoute.Waypoint startPoint) {
         this.entityId = entityId;
         this.selectedRoute = selectedRoute;
         this.currentIndex = currentIndex;
@@ -53,16 +49,16 @@ public class ToggleCruiseNavigationPacket {
         }
     }
 
-    public static ToggleCruiseNavigationPacket decode(FriendlyByteBuf buffer) {
+    public static StopCruiseNavigationPacket decode(FriendlyByteBuf buffer) {
         int entityId = buffer.readInt();
         int selectedRoute = buffer.readInt();
         int currentIndex = buffer.readInt();
         boolean holdingPattern = buffer.readBoolean();
         CruiseRoute.Waypoint startPoint = buffer.readBoolean() ? CruiseRoute.Waypoint.read(buffer) : null;
-        return new ToggleCruiseNavigationPacket(entityId, selectedRoute, currentIndex, holdingPattern, startPoint);
+        return new StopCruiseNavigationPacket(entityId, selectedRoute, currentIndex, holdingPattern, startPoint);
     }
 
-    public static void handle(ToggleCruiseNavigationPacket packet, Supplier<NetworkEvent.Context> contextSupplier) {
+    public static void handle(StopCruiseNavigationPacket packet, Supplier<NetworkEvent.Context> contextSupplier) {
         NetworkEvent.Context context = contextSupplier.get();
         context.enqueueWork(() -> {
             ServerPlayer player = context.getSender();
@@ -74,27 +70,16 @@ public class ToggleCruiseNavigationPacket {
                 return;
             }
             if (!CruiseController.hasCruiseModule(vehicle)) {
-                player.displayClientMessage(Component.translatable("message.immersive_aircraft_cruise.requires_module"), true);
                 return;
             }
 
             CruiseRoute route = CruiseController.currentRoute(vehicle).copy();
-            if (route.getSelectedEntry().waypoints().isEmpty()) {
-                player.displayClientMessage(Component.translatable("message.immersive_aircraft_cruise.no_route"), true);
+            if (!route.isEnabled() || route.getSelectedEntry().waypoints().isEmpty()) {
                 return;
             }
             packet.mergeClientProgress(vehicle, route);
-
-            if (route.isEnabled()) {
-                route.stopNavigation();
-                CruiseController.stopNavigationEffects(vehicle);
-                player.displayClientMessage(Component.translatable("message.immersive_aircraft_cruise.disabled"), true);
-            } else {
-                boolean resumed = route.hasStartPoint();
-                route.resume(startPoint(vehicle));
-                player.displayClientMessage(Component.translatable(
-                        resumed ? "message.immersive_aircraft_cruise.resumed" : "message.immersive_aircraft_cruise.enabled"), true);
-            }
+            route.stopNavigation();
+            CruiseController.stopNavigationEffects(vehicle);
 
             CruiseModuleData.write(vehicle, route);
             if (vehicle instanceof com.g1739.immersiveaircraftcruise.cruise.CruiseVehicleAccess access) {
@@ -102,12 +87,9 @@ public class ToggleCruiseNavigationPacket {
             }
             CruiseNetwork.CHANNEL.send(PacketDistributor.PLAYER.with(() -> player),
                     new UpdateCruiseRoutePacket(vehicle.getId(), route.copy()));
+            player.displayClientMessage(Component.translatable("message.immersive_aircraft_cruise.disabled"), true);
         });
         context.setPacketHandled(true);
-    }
-
-    private static CruiseRoute.Waypoint startPoint(VehicleEntity vehicle) {
-        return new CruiseRoute.Waypoint((int) Math.floor(vehicle.getX()), (int) Math.floor(vehicle.getZ()), null);
     }
 
     private void mergeClientProgress(VehicleEntity vehicle, CruiseRoute route) {

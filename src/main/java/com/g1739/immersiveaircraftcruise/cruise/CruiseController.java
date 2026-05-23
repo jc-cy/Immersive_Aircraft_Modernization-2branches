@@ -10,11 +10,9 @@ import immersive_aircraft.entity.Rotorcraft;
 import immersive_aircraft.entity.VehicleEntity;
 import immersive_aircraft.entity.inventory.VehicleInventoryDescription;
 import immersive_aircraft.entity.inventory.slots.SlotDescription;
-import net.minecraft.network.chat.Component;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.util.Mth;
 import net.minecraft.world.entity.Entity;
-import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.phys.Vec3;
 import net.minecraftforge.network.PacketDistributor;
@@ -43,6 +41,7 @@ public final class CruiseController {
     private static final Map<VehicleEntity, Float> ALTITUDE_MEMORY = new WeakHashMap<>();
     private static final Map<EngineVehicle, Float> BOOST_LEVEL = new WeakHashMap<>();
     private static final Map<VehicleEntity, Vec3> CONTROLLER_VELOCITY_BEFORE = new WeakHashMap<>();
+    private static final Map<VehicleEntity, ItemStack> ACTIVE_MODULE = new WeakHashMap<>();
 
     private CruiseController() {
     }
@@ -66,8 +65,10 @@ public final class CruiseController {
         if (!(vehicle instanceof CruiseVehicleAccess access)) {
             return;
         }
+        boolean clientSide = vehicle.level().isClientSide();
 
         if (!CruiseModuleData.hasModule(vehicle)) {
+            ACTIVE_MODULE.remove(vehicle);
             access.iacruise$setRoute(CruiseRoute.empty());
             access.iacruise$setBoosting(false);
             if (vehicle instanceof EngineVehicle engineVehicle) {
@@ -78,15 +79,23 @@ public final class CruiseController {
             return;
         }
 
-        if (!vehicle.level().isClientSide()) {
-            access.iacruise$refreshRouteFromModule();
+        CruiseRoute route = clientSide ? access.iacruise$getRoute() : serverRoute(vehicle, access);
+        if (!clientSide && vehicle.tickCount % 20 == 0) {
+            syncRouteToClient(vehicle, route);
         }
-        CruiseRoute route = access.iacruise$getRoute();
 
         if (!route.isEnabled()) {
-            setBoosting(vehicle, access, false);
-            TURN_MEMORY.remove(vehicle);
-            ALTITUDE_MEMORY.remove(vehicle);
+            stopNavigationEffects(vehicle, access);
+            return;
+        }
+
+        if (braking) {
+            route.stopNavigation();
+            stopNavigationEffects(vehicle, access);
+            if (!clientSide) {
+                CruiseModuleData.write(vehicle, route);
+                syncRouteToClient(vehicle, route);
+            }
             return;
         }
 
@@ -97,20 +106,7 @@ public final class CruiseController {
         }
 
         if (!route.hasTarget()) {
-            setBoosting(vehicle, access, false);
-            TURN_MEMORY.remove(vehicle);
-            ALTITUDE_MEMORY.remove(vehicle);
-            return;
-        }
-
-        if (braking) {
-            route.setEnabled(false);
-            setBoosting(vehicle, access, false);
-            TURN_MEMORY.remove(vehicle);
-            ALTITUDE_MEMORY.remove(vehicle);
-            CruiseModuleData.write(vehicle, route);
-            syncRouteToClient(vehicle, route);
-            notifyBrakeDisabled(vehicle);
+            stopNavigationEffects(vehicle, access);
             return;
         }
 
@@ -120,8 +116,10 @@ public final class CruiseController {
         double horizontalDistance = Math.sqrt(dx * dx + dz * dz);
         if (horizontalDistance <= WAYPOINT_RADIUS) {
             route.advance();
-            CruiseModuleData.write(vehicle, route);
-            syncRouteToClient(vehicle, route);
+            if (!clientSide) {
+                CruiseModuleData.write(vehicle, route);
+                syncRouteToClient(vehicle, route);
+            }
             waypoint = route.getTarget();
             if (waypoint == null) {
                 setBoosting(vehicle, access, false);
@@ -154,6 +152,60 @@ public final class CruiseController {
 
         boolean awayFromFinal = isAwayFromFinal(vehicle, route);
         setBoosting(vehicle, access, shouldBoost(access, yawError, altitudeError, awayFromFinal));
+    }
+
+    public static void serverProgressTick(VehicleEntity vehicle) {
+        if (vehicle.level().isClientSide() || !(vehicle instanceof CruiseVehicleAccess access)) {
+            return;
+        }
+        if (!CruiseModuleData.hasModule(vehicle)) {
+            return;
+        }
+        CruiseRoute route = serverRoute(vehicle, access);
+        if (!route.isEnabled() || route.isHoldingPattern()) {
+            return;
+        }
+        if (advanceReachedWaypoints(vehicle, route)) {
+            CruiseModuleData.write(vehicle, route);
+            syncRouteToClient(vehicle, route);
+        }
+    }
+
+    public static void stopNavigationEffects(VehicleEntity vehicle) {
+        if (vehicle instanceof CruiseVehicleAccess access) {
+            stopNavigationEffects(vehicle, access);
+        }
+    }
+
+    public static CruiseRoute currentRoute(VehicleEntity vehicle) {
+        if (!(vehicle instanceof CruiseVehicleAccess access)) {
+            return CruiseModuleData.read(vehicle);
+        }
+        if (vehicle.level().isClientSide()) {
+            return access.iacruise$getRoute();
+        }
+        return serverRoute(vehicle, access);
+    }
+
+    private static CruiseRoute serverRoute(VehicleEntity vehicle, CruiseVehicleAccess access) {
+        return CruiseModuleData.findModule(vehicle)
+                .map(stack -> {
+                    CruiseRoute cached = access.iacruise$getRoute();
+                    if (!cached.hasAnyWaypoint()) {
+                        CruiseRoute loaded = CruiseModuleData.read(stack);
+                        access.iacruise$setRoute(loaded);
+                        ACTIVE_MODULE.put(vehicle, stack);
+                        return loaded;
+                    }
+                    ACTIVE_MODULE.put(vehicle, stack);
+                    return cached;
+                })
+                .orElseGet(() -> {
+                    ACTIVE_MODULE.remove(vehicle);
+                    CruiseRoute empty = CruiseRoute.empty();
+                    access.iacruise$setRoute(empty);
+                    return empty;
+                });
     }
 
     public static float getPowerMultiplier(EngineVehicle vehicle) {
@@ -202,6 +254,26 @@ public final class CruiseController {
         return Math.sqrt(dx * dx + dz * dz) > FINAL_ACCELERATION_CUTOFF;
     }
 
+    private static boolean advanceReachedWaypoints(VehicleEntity vehicle, CruiseRoute route) {
+        boolean changed = false;
+        int guard = 0;
+        while (route.hasTarget() && guard++ < CruiseRoute.MAX_WAYPOINTS) {
+            CruiseRoute.Waypoint waypoint = route.getTarget();
+            if (horizontalDistance(vehicle, waypoint) > WAYPOINT_RADIUS) {
+                break;
+            }
+            route.advance();
+            changed = true;
+        }
+        return changed;
+    }
+
+    private static double horizontalDistance(VehicleEntity vehicle, CruiseRoute.Waypoint waypoint) {
+        double dx = waypoint.x() + 0.5 - vehicle.getX();
+        double dz = waypoint.z() + 0.5 - vehicle.getZ();
+        return Math.sqrt(dx * dx + dz * dz);
+    }
+
     private static boolean shouldBoost(CruiseVehicleAccess access, float yawError, double altitudeError, boolean awayFromFinal) {
         if (!awayFromFinal) {
             return false;
@@ -238,6 +310,15 @@ public final class CruiseController {
         if (vehicle instanceof EngineVehicle engineVehicle) {
             updateBoostLevel(engineVehicle, boosting);
         }
+    }
+
+    private static void stopNavigationEffects(VehicleEntity vehicle, CruiseVehicleAccess access) {
+        access.iacruise$setBoosting(false);
+        if (vehicle instanceof EngineVehicle engineVehicle) {
+            BOOST_LEVEL.remove(engineVehicle);
+        }
+        TURN_MEMORY.remove(vehicle);
+        ALTITUDE_MEMORY.remove(vehicle);
     }
 
     private static void updateBoostLevel(EngineVehicle vehicle, boolean boosting) {
@@ -316,15 +397,6 @@ public final class CruiseController {
         return sign * Mth.clamp(magnitude / 45.0f, 0.0f, 1.0f);
     }
 
-    private static void notifyBrakeDisabled(VehicleEntity vehicle) {
-        if (vehicle.level().isClientSide()) {
-            return;
-        }
-        if (vehicle.getControllingPassenger() instanceof Player player) {
-            player.displayClientMessage(Component.translatable("message.immersive_aircraft_cruise.disabled_brake"), true);
-        }
-    }
-
     private static void syncRouteToClient(VehicleEntity vehicle, CruiseRoute route) {
         if (!(vehicle.getControllingPassenger() instanceof ServerPlayer player)) {
             return;
@@ -376,13 +448,17 @@ public final class CruiseController {
         if (!(vehicle instanceof CruiseVehicleAccess access)) {
             return null;
         }
-        CruiseRoute.Waypoint waypoint = access.iacruise$getRoute().getTarget();
+        CruiseRoute route = access.iacruise$getRoute();
+        CruiseRoute.Waypoint waypoint = route.getTarget();
         if (waypoint == null) {
-            waypoint = access.iacruise$getRoute().getFinalTarget();
+            waypoint = route.getCurrentWaypoint();
         }
-        int altitude = access.iacruise$getRoute().isHoldingPattern()
-                ? access.iacruise$getRoute().getFinalAltitude()
-                : access.iacruise$getRoute().getTargetAltitude();
+        if (waypoint == null) {
+            waypoint = route.getFinalTarget();
+        }
+        int altitude = route.isHoldingPattern()
+                ? route.getFinalAltitude()
+                : route.getTargetAltitude();
         return waypoint == null ? null : new Vec3(waypoint.x() + 0.5, altitude, waypoint.z() + 0.5);
     }
 }

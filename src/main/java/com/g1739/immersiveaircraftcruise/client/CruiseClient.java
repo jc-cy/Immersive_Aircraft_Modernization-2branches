@@ -1,11 +1,17 @@
 package com.g1739.immersiveaircraftcruise.client;
 
 import com.g1739.immersiveaircraftcruise.ImmersiveAircraftCruise;
+import com.g1739.immersiveaircraftcruise.cruise.CruiseVehicleAccess;
 import com.g1739.immersiveaircraftcruise.network.CruiseNetwork;
 import com.g1739.immersiveaircraftcruise.network.RequestOpenCruiseScreenPacket;
+import com.g1739.immersiveaircraftcruise.network.StopCruiseNavigationPacket;
 import com.g1739.immersiveaircraftcruise.network.ToggleCruiseNavigationPacket;
 import com.mojang.blaze3d.platform.InputConstants;
+import immersive_aircraft.client.KeyBindings;
+import immersive_aircraft.entity.VehicleEntity;
+import net.minecraft.client.Minecraft;
 import net.minecraft.client.KeyMapping;
+import net.minecraft.world.entity.Entity;
 import net.minecraftforge.client.event.RegisterGuiOverlaysEvent;
 import net.minecraftforge.api.distmarker.Dist;
 import net.minecraftforge.client.event.RegisterKeyMappingsEvent;
@@ -54,6 +60,8 @@ public final class CruiseClient {
 
     @Mod.EventBusSubscriber(modid = ImmersiveAircraftCruise.MOD_ID, value = Dist.CLIENT)
     public static final class ForgeEvents {
+        private static boolean brakeWasDown;
+
         @SubscribeEvent
         public static void clientTick(TickEvent.ClientTickEvent event) {
             if (event.phase != TickEvent.Phase.END) {
@@ -63,8 +71,42 @@ public final class CruiseClient {
                 CruiseNetwork.CHANNEL.sendToServer(new RequestOpenCruiseScreenPacket());
             }
             while (TOGGLE_CRUISE.consumeClick()) {
-                CruiseNetwork.CHANNEL.sendToServer(new ToggleCruiseNavigationPacket());
+                CruiseNetwork.CHANNEL.sendToServer(togglePacket());
             }
+            boolean brakeDown = KeyBindings.down.isDown();
+            if (brakeDown && !brakeWasDown) {
+                StopCruiseNavigationPacket packet = stopPacket();
+                if (packet != null) {
+                    CruiseNetwork.CHANNEL.sendToServer(packet);
+                }
+            }
+            brakeWasDown = brakeDown;
+        }
+
+        private static ToggleCruiseNavigationPacket togglePacket() {
+            Minecraft minecraft = Minecraft.getInstance();
+            if (minecraft.player == null) {
+                return new ToggleCruiseNavigationPacket();
+            }
+            Entity root = minecraft.player.getRootVehicle();
+            if (root instanceof VehicleEntity vehicle && vehicle instanceof CruiseVehicleAccess access) {
+                return new ToggleCruiseNavigationPacket(vehicle.getId(), access.iacruise$getRoute());
+            }
+            return new ToggleCruiseNavigationPacket();
+        }
+
+        private static StopCruiseNavigationPacket stopPacket() {
+            Minecraft minecraft = Minecraft.getInstance();
+            if (minecraft.player == null) {
+                return null;
+            }
+            Entity root = minecraft.player.getRootVehicle();
+            if (root instanceof VehicleEntity vehicle && vehicle instanceof CruiseVehicleAccess access) {
+                if (access.iacruise$getRoute().hasAnyWaypoint()) {
+                    return new StopCruiseNavigationPacket(vehicle.getId(), access.iacruise$getRoute());
+                }
+            }
+            return null;
         }
     }
 }

@@ -3,7 +3,6 @@ package com.g1739.immersiveaircraftcruise.item;
 import com.g1739.immersiveaircraftcruise.cruise.CruiseModuleData;
 import com.g1739.immersiveaircraftcruise.network.CruiseNetwork;
 import com.g1739.immersiveaircraftcruise.network.OpenCruiseScreenPacket;
-import com.g1739.immersiveaircraftcruise.network.RouteStorageTarget;
 import net.minecraft.network.chat.Component;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.InteractionHand;
@@ -40,7 +39,7 @@ public class CruiseModuleItem extends Item {
         }
         if (player instanceof ServerPlayer serverPlayer) {
             CruiseNetwork.CHANNEL.send(PacketDistributor.PLAYER.with(() -> serverPlayer),
-                    new OpenCruiseScreenPacket(-1, RouteStorageTarget.HELD_MODULE, CruiseModuleData.read(stack)));
+                    new OpenCruiseScreenPacket(-1, CruiseModuleData.read(stack)));
             return InteractionResultHolder.success(stack);
         }
         return InteractionResultHolder.fail(stack);

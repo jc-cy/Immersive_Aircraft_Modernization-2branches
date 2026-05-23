@@ -2,8 +2,8 @@ package com.g1739.immersiveaircraftcruise.cruise;
 
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.nbt.ListTag;
-import net.minecraft.nbt.Tag;
 import net.minecraft.network.FriendlyByteBuf;
+import net.minecraft.nbt.Tag;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -55,7 +55,7 @@ public class CruiseRoute {
         this.enabled = enabled;
     }
 
-    public void pause() {
+    public void stopNavigation() {
         enabled = false;
     }
 
@@ -122,10 +122,24 @@ public class CruiseRoute {
         return routes.get(selectedRoute);
     }
 
+    public boolean hasAnyWaypoint() {
+        for (RouteEntry route : routes) {
+            if (!route.waypoints().isEmpty()) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     public void setSelectedEntry(RouteEntry entry) {
         clampSelectedRoute();
         routes.set(selectedRoute, entry == null ? RouteEntry.empty(defaultRouteName(selectedRoute + 1)) : entry);
         clampCurrentIndex();
+        if (getSelectedEntry().waypoints().isEmpty()) {
+            enabled = false;
+            holdingPattern = false;
+            startPoint = null;
+        }
     }
 
     public void addRoute() {
@@ -164,6 +178,19 @@ public class CruiseRoute {
             return null;
         }
         return entry.waypoints().get(currentIndex);
+    }
+
+    public boolean isWaypointReached(int index) {
+        int size = getSelectedEntry().waypoints().size();
+        if (index < 0 || index >= size) {
+            return false;
+        }
+        return index < currentIndex || (holdingPattern && index == currentIndex);
+    }
+
+    public boolean isWaypointCurrent(int index) {
+        int size = getSelectedEntry().waypoints().size();
+        return !holdingPattern && index >= 0 && index < size && index == currentIndex;
     }
 
     public Waypoint getPreviousWaypoint() {
@@ -211,6 +238,21 @@ public class CruiseRoute {
         if (getSelectedEntry().waypoints().isEmpty()) {
             enabled = false;
         }
+    }
+
+    public void applyRuntimeFrom(CruiseRoute source) {
+        if (source == null) {
+            return;
+        }
+        hudEnabled = source.hudEnabled;
+        if (source.selectedRoute != selectedRoute) {
+            return;
+        }
+        enabled = source.enabled;
+        holdingPattern = source.holdingPattern;
+        currentIndex = source.currentIndex;
+        startPoint = source.startPoint;
+        clampCurrentIndex();
     }
 
     private void clampSelectedRoute() {
@@ -279,13 +321,17 @@ public class CruiseRoute {
     }
 
     public static CruiseRoute fromTag(CompoundTag tag) {
+        boolean enabled = tag.getBoolean("Enabled");
+        if (tag.getBoolean("Paused")) {
+            enabled = false;
+        }
         ListTag list = tag.getList("Routes", Tag.TAG_COMPOUND);
         List<RouteEntry> routes = new ArrayList<>(Math.min(list.size(), MAX_ROUTES));
         for (int i = 0; i < list.size() && i < MAX_ROUTES; i++) {
             routes.add(RouteEntry.fromTag(list.getCompound(i), i + 1));
         }
         return new CruiseRoute(
-                tag.getBoolean("Enabled"),
+                enabled,
                 tag.getBoolean("HoldingPattern"),
                 !tag.contains("HudEnabled", Tag.TAG_BYTE) || tag.getBoolean("HudEnabled"),
                 tag.getInt("SelectedRoute"),

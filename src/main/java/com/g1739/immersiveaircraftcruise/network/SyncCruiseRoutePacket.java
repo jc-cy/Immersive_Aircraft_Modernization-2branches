@@ -3,7 +3,6 @@ package com.g1739.immersiveaircraftcruise.network;
 import com.g1739.immersiveaircraftcruise.cruise.CruiseController;
 import com.g1739.immersiveaircraftcruise.cruise.CruiseModuleData;
 import com.g1739.immersiveaircraftcruise.cruise.CruiseRoute;
-import com.g1739.immersiveaircraftcruise.cruise.CruiseVehicleAccess;
 import com.g1739.immersiveaircraftcruise.CruiseItems;
 import immersive_aircraft.entity.VehicleEntity;
 import net.minecraft.network.FriendlyByteBuf;
@@ -40,7 +39,6 @@ public record SyncCruiseRoutePacket(int entityId, RouteStorageTarget target, Cru
                 return;
             }
             CruiseRoute route = packet.route.copy();
-            route.pause();
 
             if (packet.target == RouteStorageTarget.HELD_MODULE) {
                 ItemStack stack = player.getMainHandItem().is(CruiseItems.CRUISE_MODULE.get()) ? player.getMainHandItem() : player.getOffhandItem();
@@ -54,13 +52,15 @@ public record SyncCruiseRoutePacket(int entityId, RouteStorageTarget target, Cru
             }
 
             Entity entity = player.level().getEntity(packet.entityId);
-            if (entity instanceof VehicleEntity vehicle && vehicle.hasPassenger(player) && vehicle instanceof CruiseVehicleAccess access) {
+            if (entity instanceof VehicleEntity vehicle && vehicle.hasPassenger(player)) {
                 if (!CruiseController.hasCruiseModule(vehicle)) {
                     player.displayClientMessage(Component.translatable("message.immersive_aircraft_cruise.requires_module"), true);
                     return;
                 }
                 CruiseModuleData.write(vehicle, route);
-                access.iacruise$setRoute(route);
+                if (vehicle instanceof com.g1739.immersiveaircraftcruise.cruise.CruiseVehicleAccess access) {
+                    access.iacruise$setRoute(route.copy());
+                }
                 CruiseNetwork.CHANNEL.send(PacketDistributor.PLAYER.with(() -> player),
                         new UpdateCruiseRoutePacket(vehicle.getId(), route.copy()));
                 sendSavedMessage(packet, player);
@@ -71,7 +71,7 @@ public record SyncCruiseRoutePacket(int entityId, RouteStorageTarget target, Cru
 
     private static void sendSavedMessage(SyncCruiseRoutePacket packet, ServerPlayer player) {
         if (packet.showMessage) {
-            player.displayClientMessage(Component.translatable("message.immersive_aircraft_cruise.saved"), true);
+            player.displayClientMessage(Component.translatable("message.immersive_aircraft_cruise.saved_and_refreshed"), true);
         }
     }
 }
