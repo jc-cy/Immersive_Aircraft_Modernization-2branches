@@ -1,0 +1,29 @@
+# Gradle build output and cache
+.gradle/
+build/
+
+# Minecraft / Forge local run output
+run/
+runs/
+logs/
+crash-reports/
+
+# IDE and local editor state
+.idea/
+.vscode/
+*.iml
+
+# OS files
+Thumbs.db
+desktop.ini
+
+# Local source art already copied into src/main/resources
+正常模式.png
+加速模式.png
+新加速模式多帧动画.png
+
+# Local project notes
+开发文档.md
+工作交接.md
+任务清单.md
+历史修改.md

@@ -1,0 +1,414 @@
+package com.g1739.immersiveaircraftcruise.cruise;
+
+import net.minecraft.nbt.CompoundTag;
+import net.minecraft.nbt.ListTag;
+import net.minecraft.nbt.Tag;
+import net.minecraft.network.FriendlyByteBuf;
+
+import java.util.ArrayList;
+import java.util.List;
+
+public class CruiseRoute {
+    public static final int MAX_ROUTES = 16;
+    public static final int MAX_WAYPOINTS = 32;
+
+    private boolean enabled;
+    private boolean holdingPattern;
+    private boolean hudEnabled;
+    private int selectedRoute;
+    private int currentIndex;
+    private Waypoint startPoint;
+    private final List<RouteEntry> routes;
+
+    public CruiseRoute(boolean enabled, boolean holdingPattern, boolean hudEnabled, int selectedRoute, int currentIndex, List<RouteEntry> routes) {
+        this(enabled, holdingPattern, hudEnabled, selectedRoute, currentIndex, null, routes);
+    }
+
+    public CruiseRoute(boolean enabled, boolean holdingPattern, boolean hudEnabled, int selectedRoute, int currentIndex, Waypoint startPoint, List<RouteEntry> routes) {
+        this.enabled = enabled;
+        this.holdingPattern = holdingPattern;
+        this.hudEnabled = hudEnabled;
+        this.selectedRoute = Math.max(0, selectedRoute);
+        this.currentIndex = Math.max(0, currentIndex);
+        this.startPoint = startPoint;
+        this.routes = new ArrayList<>(routes.stream().limit(MAX_ROUTES).toList());
+        if (this.routes.isEmpty()) {
+            this.routes.add(RouteEntry.empty(defaultRouteName(1)));
+        }
+        clampSelectedRoute();
+        clampCurrentIndex();
+    }
+
+    public static CruiseRoute empty() {
+        return new CruiseRoute(false, false, true, 0, 0, List.of(RouteEntry.empty(defaultRouteName(1))));
+    }
+
+    public CruiseRoute copy() {
+        return new CruiseRoute(enabled, holdingPattern, hudEnabled, selectedRoute, currentIndex, startPoint, routes);
+    }
+
+    public boolean isEnabled() {
+        return enabled;
+    }
+
+    public void setEnabled(boolean enabled) {
+        this.enabled = enabled;
+    }
+
+    public void pause() {
+        enabled = false;
+    }
+
+    public void resume(Waypoint startPointIfMissing) {
+        if (startPoint == null && startPointIfMissing != null) {
+            startPoint = startPointIfMissing;
+        }
+        enabled = true;
+    }
+
+    public boolean isHoldingPattern() {
+        return holdingPattern;
+    }
+
+    public void setHoldingPattern(boolean holdingPattern) {
+        this.holdingPattern = holdingPattern;
+    }
+
+    public boolean isHudEnabled() {
+        return hudEnabled;
+    }
+
+    public void setHudEnabled(boolean hudEnabled) {
+        this.hudEnabled = hudEnabled;
+    }
+
+    public int getSelectedRoute() {
+        return selectedRoute;
+    }
+
+    public void setSelectedRoute(int selectedRoute) {
+        this.selectedRoute = Math.max(0, selectedRoute);
+        clampSelectedRoute();
+        resetProgress();
+    }
+
+    public int getCurrentIndex() {
+        return currentIndex;
+    }
+
+    public void setCurrentIndex(int currentIndex) {
+        this.currentIndex = Math.max(0, currentIndex);
+        clampCurrentIndex();
+    }
+
+    public Waypoint getStartPoint() {
+        return startPoint;
+    }
+
+    public boolean hasStartPoint() {
+        return startPoint != null;
+    }
+
+    public void setStartPoint(Waypoint startPoint) {
+        this.startPoint = startPoint;
+    }
+
+    public List<RouteEntry> getRoutes() {
+        return routes;
+    }
+
+    public RouteEntry getSelectedEntry() {
+        clampSelectedRoute();
+        return routes.get(selectedRoute);
+    }
+
+    public void setSelectedEntry(RouteEntry entry) {
+        clampSelectedRoute();
+        routes.set(selectedRoute, entry == null ? RouteEntry.empty(defaultRouteName(selectedRoute + 1)) : entry);
+        clampCurrentIndex();
+    }
+
+    public void addRoute() {
+        if (routes.size() >= MAX_ROUTES) {
+            return;
+        }
+        routes.add(RouteEntry.empty(defaultRouteName(routes.size() + 1)));
+        selectedRoute = routes.size() - 1;
+        resetProgress();
+    }
+
+    public void removeSelectedRoute() {
+        if (routes.size() <= 1) {
+            setSelectedEntry(RouteEntry.empty(defaultRouteName(1)));
+            resetProgress();
+            return;
+        }
+        routes.remove(selectedRoute);
+        if (selectedRoute >= routes.size()) {
+            selectedRoute = routes.size() - 1;
+        }
+        resetProgress();
+    }
+
+    public boolean hasTarget() {
+        return enabled && !holdingPattern && currentIndex >= 0 && currentIndex < getSelectedEntry().waypoints().size();
+    }
+
+    public Waypoint getTarget() {
+        return hasTarget() ? getCurrentWaypoint() : null;
+    }
+
+    public Waypoint getCurrentWaypoint() {
+        RouteEntry entry = getSelectedEntry();
+        if (currentIndex < 0 || currentIndex >= entry.waypoints().size()) {
+            return null;
+        }
+        return entry.waypoints().get(currentIndex);
+    }
+
+    public Waypoint getPreviousWaypoint() {
+        if (holdingPattern) {
+            return getFinalTarget();
+        }
+        RouteEntry entry = getSelectedEntry();
+        if (entry.waypoints().isEmpty() || currentIndex <= 0) {
+            return null;
+        }
+        int index = Math.min(Math.max(0, currentIndex - 1), entry.waypoints().size() - 1);
+        return entry.waypoints().get(index);
+    }
+
+    public Waypoint getFinalTarget() {
+        List<Waypoint> waypoints = getSelectedEntry().waypoints();
+        return waypoints.isEmpty() ? null : waypoints.get(waypoints.size() - 1);
+    }
+
+    public int getTargetAltitude() {
+        Waypoint target = getTarget();
+        if (target == null) {
+            target = getCurrentWaypoint();
+        }
+        return target != null && target.hasAltitudeOverride() ? target.altitude() : getSelectedEntry().defaultAltitude();
+    }
+
+    public int getFinalAltitude() {
+        Waypoint finalTarget = getFinalTarget();
+        return finalTarget != null && finalTarget.hasAltitudeOverride() ? finalTarget.altitude() : getSelectedEntry().defaultAltitude();
+    }
+
+    public void advance() {
+        currentIndex++;
+        if (currentIndex >= getSelectedEntry().waypoints().size()) {
+            holdingPattern = true;
+            currentIndex = Math.max(0, getSelectedEntry().waypoints().size() - 1);
+        }
+    }
+
+    public void resetProgress() {
+        currentIndex = 0;
+        holdingPattern = false;
+        startPoint = null;
+        if (getSelectedEntry().waypoints().isEmpty()) {
+            enabled = false;
+        }
+    }
+
+    private void clampSelectedRoute() {
+        if (selectedRoute >= routes.size()) {
+            selectedRoute = routes.size() - 1;
+        }
+    }
+
+    private void clampCurrentIndex() {
+        int size = getSelectedEntry().waypoints().size();
+        if (size == 0) {
+            currentIndex = 0;
+            holdingPattern = false;
+        } else if (currentIndex >= size) {
+            currentIndex = size - 1;
+        }
+    }
+
+    public void write(FriendlyByteBuf buffer) {
+        buffer.writeBoolean(enabled);
+        buffer.writeBoolean(holdingPattern);
+        buffer.writeBoolean(hudEnabled);
+        buffer.writeInt(selectedRoute);
+        buffer.writeInt(currentIndex);
+        buffer.writeBoolean(startPoint != null);
+        if (startPoint != null) {
+            startPoint.write(buffer);
+        }
+        buffer.writeInt(routes.size());
+        for (RouteEntry route : routes) {
+            route.write(buffer);
+        }
+    }
+
+    public static CruiseRoute read(FriendlyByteBuf buffer) {
+        boolean enabled = buffer.readBoolean();
+        boolean holdingPattern = buffer.readBoolean();
+        boolean hudEnabled = buffer.readBoolean();
+        int selectedRoute = buffer.readInt();
+        int currentIndex = buffer.readInt();
+        Waypoint startPoint = buffer.readBoolean() ? Waypoint.read(buffer) : null;
+        int size = Math.min(buffer.readInt(), MAX_ROUTES);
+        List<RouteEntry> routes = new ArrayList<>(size);
+        for (int i = 0; i < size; i++) {
+            routes.add(RouteEntry.read(buffer));
+        }
+        return new CruiseRoute(enabled, holdingPattern, hudEnabled, selectedRoute, currentIndex, startPoint, routes);
+    }
+
+    public CompoundTag toTag() {
+        CompoundTag tag = new CompoundTag();
+        tag.putBoolean("Enabled", enabled);
+        tag.putBoolean("HoldingPattern", holdingPattern);
+        tag.putBoolean("HudEnabled", hudEnabled);
+        tag.putInt("SelectedRoute", selectedRoute);
+        tag.putInt("CurrentIndex", currentIndex);
+        if (startPoint != null) {
+            tag.put("StartPoint", startPoint.toTag());
+        }
+        ListTag list = new ListTag();
+        for (RouteEntry route : routes) {
+            list.add(route.toTag());
+        }
+        tag.put("Routes", list);
+        return tag;
+    }
+
+    public static CruiseRoute fromTag(CompoundTag tag) {
+        ListTag list = tag.getList("Routes", Tag.TAG_COMPOUND);
+        List<RouteEntry> routes = new ArrayList<>(Math.min(list.size(), MAX_ROUTES));
+        for (int i = 0; i < list.size() && i < MAX_ROUTES; i++) {
+            routes.add(RouteEntry.fromTag(list.getCompound(i), i + 1));
+        }
+        return new CruiseRoute(
+                tag.getBoolean("Enabled"),
+                tag.getBoolean("HoldingPattern"),
+                !tag.contains("HudEnabled", Tag.TAG_BYTE) || tag.getBoolean("HudEnabled"),
+                tag.getInt("SelectedRoute"),
+                tag.getInt("CurrentIndex"),
+                tag.contains("StartPoint", Tag.TAG_COMPOUND) ? Waypoint.fromTag(tag.getCompound("StartPoint")) : null,
+                routes
+        );
+    }
+
+    private static String defaultRouteName(int index) {
+        return "Route " + index;
+    }
+
+    public record RouteEntry(String name, int defaultAltitude, List<Waypoint> waypoints) {
+        public static RouteEntry empty(String name) {
+            return new RouteEntry(name, 96, List.of());
+        }
+
+        public RouteEntry {
+            if (name == null || name.isBlank()) {
+                name = defaultRouteName(1);
+            }
+            waypoints = new ArrayList<>(waypoints.stream().limit(MAX_WAYPOINTS).toList());
+        }
+
+        public void write(FriendlyByteBuf buffer) {
+            buffer.writeUtf(name, 64);
+            buffer.writeInt(defaultAltitude);
+            buffer.writeInt(waypoints.size());
+            for (Waypoint waypoint : waypoints) {
+                waypoint.write(buffer);
+            }
+        }
+
+        public static RouteEntry read(FriendlyByteBuf buffer) {
+            String name = buffer.readUtf(64);
+            int defaultAltitude = buffer.readInt();
+            int size = Math.min(buffer.readInt(), MAX_WAYPOINTS);
+            List<Waypoint> waypoints = new ArrayList<>(size);
+            for (int i = 0; i < size; i++) {
+                waypoints.add(Waypoint.read(buffer));
+            }
+            return new RouteEntry(name, defaultAltitude, waypoints);
+        }
+
+        public CompoundTag toTag() {
+            CompoundTag tag = new CompoundTag();
+            tag.putString("Name", name);
+            tag.putInt("DefaultAltitude", defaultAltitude);
+            ListTag list = new ListTag();
+            for (Waypoint waypoint : waypoints) {
+                list.add(waypoint.toTag());
+            }
+            tag.put("Waypoints", list);
+            return tag;
+        }
+
+        public static RouteEntry fromTag(CompoundTag tag, int index) {
+            ListTag list = tag.getList("Waypoints", Tag.TAG_COMPOUND);
+            List<Waypoint> waypoints = new ArrayList<>(Math.min(list.size(), MAX_WAYPOINTS));
+            for (int i = 0; i < list.size() && i < MAX_WAYPOINTS; i++) {
+                waypoints.add(Waypoint.fromTag(list.getCompound(i)));
+            }
+            String name = tag.contains("Name", Tag.TAG_STRING) ? tag.getString("Name") : defaultRouteName(index);
+            int defaultAltitude = tag.contains("DefaultAltitude", Tag.TAG_INT) ? tag.getInt("DefaultAltitude") : 96;
+            return new RouteEntry(name, defaultAltitude, waypoints);
+        }
+    }
+
+    public record Waypoint(int x, int z, Integer altitude, String name) {
+        public Waypoint(int x, int z, Integer altitude) {
+            this(x, z, altitude, null);
+        }
+
+        public Waypoint {
+            name = name == null ? "" : name.strip();
+        }
+
+        public boolean hasAltitudeOverride() {
+            return altitude != null;
+        }
+
+        public boolean hasName() {
+            return !name.isBlank();
+        }
+
+        public String displayLabel() {
+            return hasName() ? name : x + "," + z;
+        }
+
+        public void write(FriendlyByteBuf buffer) {
+            buffer.writeInt(x);
+            buffer.writeInt(z);
+            buffer.writeBoolean(altitude != null);
+            if (altitude != null) {
+                buffer.writeInt(altitude);
+            }
+            buffer.writeUtf(name, 64);
+        }
+
+        public static Waypoint read(FriendlyByteBuf buffer) {
+            int x = buffer.readInt();
+            int z = buffer.readInt();
+            Integer altitude = buffer.readBoolean() ? buffer.readInt() : null;
+            String name = buffer.readUtf(64);
+            return new Waypoint(x, z, altitude, name);
+        }
+
+        public CompoundTag toTag() {
+            CompoundTag tag = new CompoundTag();
+            tag.putInt("X", x);
+            tag.putInt("Z", z);
+            if (altitude != null) {
+                tag.putInt("Altitude", altitude);
+            }
+            tag.putString("Name", name);
+            return tag;
+        }
+
+        public static Waypoint fromTag(CompoundTag tag) {
+            Integer altitude = tag.contains("Altitude", Tag.TAG_INT) ? tag.getInt("Altitude") : null;
+            String name = tag.contains("Name", Tag.TAG_STRING) ? tag.getString("Name") : "";
+            return new Waypoint(tag.getInt("X"), tag.getInt("Z"), altitude, name);
+        }
+    }
+}
