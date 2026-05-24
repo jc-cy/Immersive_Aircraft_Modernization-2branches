@@ -6,10 +6,12 @@ import com.g1739.immersiveaircraftcruise.network.UpdateCruiseFuelPacket;
 import com.g1739.immersiveaircraftcruise.network.UpdateCruiseRoutePacket;
 import immersive_aircraft.entity.AirplaneEntity;
 import immersive_aircraft.entity.EngineVehicle;
+import immersive_aircraft.entity.InventoryVehicleEntity;
 import immersive_aircraft.entity.Rotorcraft;
 import immersive_aircraft.entity.VehicleEntity;
 import immersive_aircraft.entity.inventory.VehicleInventoryDescription;
 import immersive_aircraft.entity.inventory.slots.SlotDescription;
+import immersive_aircraft.item.upgrade.VehicleStat;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.util.Mth;
 import net.minecraft.world.entity.Entity;
@@ -23,6 +25,39 @@ import java.util.WeakHashMap;
 public final class CruiseController {
     private static final double WAYPOINT_RADIUS = 16.0;
     private static final double FINAL_ACCELERATION_CUTOFF = 100.0;
+    private static final double LANDING_HORIZONTAL_RADIUS = 5.0;
+    private static final double FAST_LANDING_HORIZONTAL_RADIUS = 2.0;
+    private static final double FAST_LANDING_TURN_RADIUS = 0.25;
+    private static final double BAMBOO_HOPPER_TOUCHDOWN_SLIDE_RESERVE = 1.5;
+    private static final double BIPLANE_TOUCHDOWN_SLIDE_RESERVE = 0.5;
+    private static final double LANDING_ALTITUDE_RADIUS = 3.0;
+    private static final double FAST_LANDING_PLAN_ALTITUDE_RADIUS = 1.0;
+    private static final double FAST_LANDING_COMPLETION_ALTITUDE_RADIUS = 1.0;
+    private static final double LANDING_STOP_SPEED = 0.06;
+    private static final double LANDING_VERTICAL_STOP_SPEED = 0.08;
+    private static final int POST_LANDING_BRAKE_TICKS = 60;
+    private static final double FAST_LANDING_DESCENT_BUFFER = 8.0;
+    private static final double FAST_LANDING_BRAKE_BUFFER = 0.0;
+    private static final double FAST_LANDING_STOP_DISTANCE_SAFETY = 1.05;
+    private static final double FAST_LANDING_BRAKE_RESPONSE_TICKS = 1.0;
+    private static final int FAST_LANDING_BRAKE_SIMULATION_TICKS = 120;
+    private static final int FAST_LANDING_FLARE_SIMULATION_TICKS = 80;
+    private static final double FAST_LANDING_FLARE_VERTICAL_SPEED = 0.08;
+    private static final double FAST_LANDING_BRAKE_PLATEAU_DELTA = 0.003;
+    private static final int FAST_LANDING_BRAKE_PLATEAU_TICKS = 8;
+    private static final int FAST_LANDING_DESCENT_SIMULATION_TICKS = 240;
+    private static final double FAST_LANDING_SPEED_DEAD_ZONE = 0.03;
+    private static final float FAST_LANDING_MIN_CRUISE_BOOST = 0.0f;
+    private static final double MIN_DESCENT_RATE = 0.20;
+    private static final double MIN_AIRPLANE_DESCENT_RATE = 0.32;
+    private static final double MIN_ROTORCRAFT_DESCENT_RATE = 0.22;
+    private static final double AIRPLANE_ACTIVE_DESCENT_SPEED_FACTOR = 0.55;
+    private static final double ROTORCRAFT_ACTIVE_DESCENT_PROPERTY_FACTOR = 2.4;
+    private static final double FAST_LANDING_LATERAL_DEAD_ZONE = 0.5;
+    private static final float FAST_LANDING_YAW_DEAD_ZONE = 0.2f;
+    private static final float FAST_LANDING_MIN_TURN_INPUT = 0.08f;
+    private static final float FAST_DESCENT_AIRPLANE_PITCH = 1.0f;
+    private static final float FAST_DESCENT_VERTICAL_INPUT = -1.0f;
     private static final float YAW_DEAD_ZONE = 3.0f;
     private static final float YAW_REVERSE_ZONE = 175.0f;
     private static final float ALTITUDE_DEAD_ZONE = 5.0f;
@@ -42,6 +77,10 @@ public final class CruiseController {
     private static final Map<EngineVehicle, Float> BOOST_LEVEL = new WeakHashMap<>();
     private static final Map<VehicleEntity, Vec3> CONTROLLER_VELOCITY_BEFORE = new WeakHashMap<>();
     private static final Map<VehicleEntity, ItemStack> ACTIVE_MODULE = new WeakHashMap<>();
+    private static final Map<VehicleEntity, Boolean> LANDING_ACTIVE = new WeakHashMap<>();
+    private static final Map<VehicleEntity, Boolean> FAST_LANDING_FINAL_BRAKE_ACTIVE = new WeakHashMap<>();
+    private static final Map<VehicleEntity, Boolean> AUTO_BRAKE_INPUT = new WeakHashMap<>();
+    private static final Map<VehicleEntity, Integer> POST_LANDING_BRAKE = new WeakHashMap<>();
 
     private CruiseController() {
     }
@@ -66,6 +105,7 @@ public final class CruiseController {
             return;
         }
         boolean clientSide = vehicle.level().isClientSide();
+        boolean automaticBrakeInput = Boolean.TRUE.equals(AUTO_BRAKE_INPUT.remove(vehicle));
 
         if (!CruiseModuleData.hasModule(vehicle)) {
             ACTIVE_MODULE.remove(vehicle);
@@ -76,6 +116,10 @@ public final class CruiseController {
             }
             TURN_MEMORY.remove(vehicle);
             ALTITUDE_MEMORY.remove(vehicle);
+            LANDING_ACTIVE.remove(vehicle);
+            FAST_LANDING_FINAL_BRAKE_ACTIVE.remove(vehicle);
+            AUTO_BRAKE_INPUT.remove(vehicle);
+            POST_LANDING_BRAKE.remove(vehicle);
             return;
         }
 
@@ -89,7 +133,7 @@ public final class CruiseController {
             return;
         }
 
-        if (braking) {
+        if (braking && !automaticBrakeInput) {
             route.stopNavigation();
             stopNavigationEffects(vehicle, access);
             if (!clientSide) {
@@ -110,11 +154,19 @@ public final class CruiseController {
             return;
         }
 
+        if (updateInitialAltitudeProgress(vehicle, route) && !clientSide) {
+            CruiseModuleData.write(vehicle, route);
+            syncRouteToClient(vehicle, route);
+        }
+
         CruiseRoute.Waypoint waypoint = route.getTarget();
         double dx = waypoint.x() + 0.5 - vehicle.getX();
         double dz = waypoint.z() + 0.5 - vehicle.getZ();
         double horizontalDistance = Math.sqrt(dx * dx + dz * dz);
-        if (horizontalDistance <= WAYPOINT_RADIUS) {
+        if (tickFinalLandingApproach(vehicle, access, route, waypoint, horizontalDistance, dx, dz, clientSide)) {
+            return;
+        }
+        if (horizontalDistance <= WAYPOINT_RADIUS && canAdvanceTarget(vehicle, route)) {
             route.advance();
             if (!clientSide) {
                 CruiseModuleData.write(vehicle, route);
@@ -124,15 +176,20 @@ public final class CruiseController {
             if (waypoint == null) {
                 setBoosting(vehicle, access, false);
                 TURN_MEMORY.remove(vehicle);
+                LANDING_ACTIVE.remove(vehicle);
+                FAST_LANDING_FINAL_BRAKE_ACTIVE.remove(vehicle);
                 tickHoldingPattern(vehicle, route);
                 return;
             }
             dx = waypoint.x() + 0.5 - vehicle.getX();
             dz = waypoint.z() + 0.5 - vehicle.getZ();
             horizontalDistance = Math.sqrt(dx * dx + dz * dz);
+            if (tickFinalLandingApproach(vehicle, access, route, waypoint, horizontalDistance, dx, dz, clientSide)) {
+                return;
+            }
         }
 
-        int targetAltitude = route.getTargetAltitude();
+        int targetAltitude = navigationAltitude(route);
         double altitudeError = targetAltitude - vehicle.getY();
         float yawError = yawError(vehicle.getYRot(), dx, dz);
         float turn = turnInput(vehicle, yawError);
@@ -140,9 +197,9 @@ public final class CruiseController {
 
         if (vehicle instanceof AirplaneEntity) {
             float pitchInput = -climbInput;
-            vehicle.setInputs(turn, 0.0f, pitchInput);
+            setCruiseInputs(vehicle, turn, 0.0f, pitchInput);
         } else {
-            vehicle.setInputs(turn, climbInput, 1.0f);
+            setCruiseInputs(vehicle, turn, climbInput, 1.0f);
             vehicle.setYRot(vehicle.getYRot() - turn * 1.5f);
         }
 
@@ -165,7 +222,11 @@ public final class CruiseController {
         if (!route.isEnabled() || route.isHoldingPattern()) {
             return;
         }
+        boolean changed = updateInitialAltitudeProgress(vehicle, route);
         if (advanceReachedWaypoints(vehicle, route)) {
+            changed = true;
+        }
+        if (changed) {
             CruiseModuleData.write(vehicle, route);
             syncRouteToClient(vehicle, route);
         }
@@ -229,15 +290,20 @@ public final class CruiseController {
         if (!route.isEnabled()) {
             return;
         }
-        float turn = -1.0f;
+        LANDING_ACTIVE.remove(vehicle);
+        FAST_LANDING_FINAL_BRAKE_ACTIVE.remove(vehicle);
+        boolean rotorcraft = isVerticalAircraft(vehicle);
+        float turn = rotorcraft ? 0.0f : -1.0f;
         double altitudeError = route.getFinalAltitude() - vehicle.getY();
         float climbInput = altitudeInput(vehicle, altitudeError);
         if (vehicle instanceof AirplaneEntity) {
             float pitchInput = -climbInput;
-            vehicle.setInputs(turn, 0.0f, pitchInput);
+            setCruiseInputs(vehicle, turn, 0.0f, pitchInput);
         } else {
-            vehicle.setInputs(turn, climbInput, 1.0f);
-            vehicle.setYRot(vehicle.getYRot() - turn * 1.5f);
+            setCruiseInputs(vehicle, turn, climbInput, rotorcraft ? 0.0f : 1.0f);
+            if (turn != 0.0f) {
+                vehicle.setYRot(vehicle.getYRot() - turn * 1.5f);
+            }
         }
         if (vehicle instanceof EngineVehicle engineVehicle && engineVehicle.getEngineTarget() < 1.0f) {
             engineVehicle.setEngineTarget(1.0f);
@@ -251,7 +317,11 @@ public final class CruiseController {
         }
         double dx = finalTarget.x() + 0.5 - vehicle.getX();
         double dz = finalTarget.z() + 0.5 - vehicle.getZ();
-        return Math.sqrt(dx * dx + dz * dz) > FINAL_ACCELERATION_CUTOFF;
+        double distance = Math.sqrt(dx * dx + dz * dz);
+        if (route.getEffectiveLandingMode() != CruiseRoute.LandingMode.HOLDING_PATTERN) {
+            return true;
+        }
+        return distance > FINAL_ACCELERATION_CUTOFF;
     }
 
     private static boolean advanceReachedWaypoints(VehicleEntity vehicle, CruiseRoute route) {
@@ -262,16 +332,789 @@ public final class CruiseController {
             if (horizontalDistance(vehicle, waypoint) > WAYPOINT_RADIUS) {
                 break;
             }
+            if (!canAdvanceTarget(vehicle, route)) {
+                break;
+            }
             route.advance();
             changed = true;
         }
         return changed;
     }
 
+    private static boolean canAdvanceTarget(VehicleEntity vehicle, CruiseRoute route) {
+        if (route.isFinalTarget() && route.getEffectiveLandingMode() != CruiseRoute.LandingMode.HOLDING_PATTERN) {
+            return false;
+        }
+        return true;
+    }
+
+    private static int navigationAltitude(CruiseRoute route) {
+        return route.getTargetAltitude();
+    }
+
+    private static boolean tickFinalLandingApproach(VehicleEntity vehicle, CruiseVehicleAccess access, CruiseRoute route, CruiseRoute.Waypoint waypoint,
+                                                    double horizontalDistance, double dx, double dz, boolean clientSide) {
+        if (!route.isFinalTarget()) {
+            return false;
+        }
+        CruiseRoute.LandingMode landingMode = route.getEffectiveLandingMode();
+        return landingMode != CruiseRoute.LandingMode.HOLDING_PATTERN
+                && tickLandingApproach(vehicle, access, route, waypoint, horizontalDistance, dx, dz, landingMode, clientSide);
+    }
+
+    private static boolean tickLandingApproach(VehicleEntity vehicle, CruiseVehicleAccess access, CruiseRoute route, CruiseRoute.Waypoint waypoint,
+                                               double horizontalDistance, double dx, double dz, CruiseRoute.LandingMode landingMode, boolean clientSide) {
+        if (landingMode == CruiseRoute.LandingMode.VERTICAL) {
+            if (tickVerticalLanding(vehicle, access, route, waypoint, horizontalDistance, dx, dz, clientSide)) {
+                return true;
+            }
+            return false;
+        }
+        return tickFastestLanding(vehicle, access, route, waypoint, horizontalDistance, dx, dz, clientSide);
+    }
+
+    private static boolean tickVerticalLanding(VehicleEntity vehicle, CruiseVehicleAccess access, CruiseRoute route, CruiseRoute.Waypoint waypoint,
+                                               double horizontalDistance, double dx, double dz, boolean clientSide) {
+        if (horizontalDistance > WAYPOINT_RADIUS && !LANDING_ACTIVE.containsKey(vehicle)) {
+            return false;
+        }
+        LANDING_ACTIVE.put(vehicle, true);
+        setBoosting(vehicle, access, false);
+
+        double altitudeError = route.getFinalAltitude() - vehicle.getY();
+        if (isVerticalAircraft(vehicle)) {
+            float yawError = yawError(vehicle.getYRot(), dx, dz);
+            float turn = horizontalDistance > LANDING_HORIZONTAL_RADIUS ? turnInput(vehicle, yawError) : 0.0f;
+            float climbInput = altitudeInput(vehicle, altitudeError);
+            setCruiseInputs(vehicle, turn, climbInput, horizontalDistance > LANDING_HORIZONTAL_RADIUS ? 0.4f : 0.0f);
+            vehicle.setDeltaMovement(brakedVelocity(vehicle, 0.90d));
+            if (vehicle instanceof EngineVehicle engineVehicle && engineVehicle.getEngineTarget() < 1.0f) {
+                engineVehicle.setEngineTarget(1.0f);
+            }
+        } else {
+            tickCirclingDescent(vehicle, route, altitudeError);
+        }
+
+        double radius = isVerticalAircraft(vehicle) ? LANDING_HORIZONTAL_RADIUS : WAYPOINT_RADIUS;
+        if (isLandingComplete(vehicle, waypoint, route.getFinalAltitude(), radius, LANDING_ALTITUDE_RADIUS,
+                isVerticalAircraft(vehicle) ? LANDING_VERTICAL_STOP_SPEED : 0.35d)) {
+            finishLanding(vehicle, access, route, clientSide);
+        }
+        return true;
+    }
+
+    private static boolean tickFastestLanding(VehicleEntity vehicle, CruiseVehicleAccess access, CruiseRoute route, CruiseRoute.Waypoint waypoint,
+                                              double horizontalDistance, double dx, double dz, boolean clientSide) {
+        LandingTarget landingTarget = fastLandingTarget(vehicle, route, waypoint);
+        dx = landingTarget.x() - vehicle.getX();
+        dz = landingTarget.z() - vehicle.getZ();
+        horizontalDistance = Math.sqrt(dx * dx + dz * dz);
+        double altitudeError = route.getFinalAltitude() - vehicle.getY();
+        Integer postBrakeTicks = POST_LANDING_BRAKE.get(vehicle);
+        if (postBrakeTicks != null) {
+            tickPostLandingBrake(vehicle, access, route, postBrakeTicks, clientSide);
+            return true;
+        }
+
+        FastLandingPlan plan = fastLandingPlan(vehicle, horizontalDistance, altitudeError);
+        boolean descentCommitted = LANDING_ACTIVE.containsKey(vehicle) || plan.descend();
+        boolean finalBrake = FAST_LANDING_FINAL_BRAKE_ACTIVE.containsKey(vehicle) || plan.brake();
+        boolean shouldLand = descentCommitted || finalBrake;
+        if (!shouldLand) {
+            return false;
+        }
+        if (descentCommitted) {
+            LANDING_ACTIVE.put(vehicle, true);
+        }
+        if (finalBrake) {
+            FAST_LANDING_FINAL_BRAKE_ACTIVE.put(vehicle, true);
+        }
+
+        float yawError = yawError(vehicle.getYRot(), dx, dz);
+        float turn = horizontalDistance > FAST_LANDING_TURN_RADIUS ? fastLandingTurnInput(vehicle, yawError, horizontalDistance) : 0.0f;
+        boolean activelyReducingSpeed = finalBrake;
+        FlareEstimate flareEstimate = flareEstimate(vehicle, altitudeError, finalBrake, plan.boostTarget(), horizontalDistance, plan.stopTicks());
+        boolean forceDescent = descentCommitted && shouldForceDescent(plan, flareEstimate, finalBrake);
+        double controlAltitudeError = descentCommitted ? altitudeError : route.getTargetAltitude() - vehicle.getY();
+        float climbInput = forceDescent ? 0.0f : altitudeInput(vehicle, controlAltitudeError);
+        float boostTarget = activelyReducingSpeed ? 0.0f : plan.boostTarget();
+        if (activelyReducingSpeed) {
+            stopBoostingImmediately(vehicle, access);
+        } else {
+            setBoosting(vehicle, access, true, boostTarget);
+        }
+        if (vehicle instanceof AirplaneEntity) {
+            float pitchInput = forceDescent ? FAST_DESCENT_AIRPLANE_PITCH : -climbInput;
+            setCruiseInputs(vehicle, turn, finalBrake ? -1.0f : 0.0f, pitchInput);
+        } else {
+            float verticalInput = forceDescent ? FAST_DESCENT_VERTICAL_INPUT : climbInput;
+            float forwardInput = horizontalDistance > FAST_LANDING_HORIZONTAL_RADIUS ? (activelyReducingSpeed ? 0.0f : 1.0f) : 0.0f;
+            setCruiseInputs(vehicle, turn, verticalInput, forwardInput);
+            if (turn != 0.0f) {
+                vehicle.setYRot(vehicle.getYRot() - turn * 1.5f);
+            }
+        }
+        if (!activelyReducingSpeed && vehicle instanceof EngineVehicle engineVehicle && engineVehicle.getEngineTarget() < 1.0f) {
+            engineVehicle.setEngineTarget(1.0f);
+        }
+        if (finalBrake) {
+            brakeForLanding(vehicle, horizontalDistance);
+        }
+
+        if (isLandingComplete(vehicle, landingTarget.x(), landingTarget.z(), route.getFinalAltitude(), FAST_LANDING_HORIZONTAL_RADIUS,
+                FAST_LANDING_COMPLETION_ALTITUDE_RADIUS, LANDING_STOP_SPEED)) {
+            beginPostLandingBrake(vehicle, access, route, clientSide);
+        }
+        return true;
+    }
+
+    private static void beginPostLandingBrake(VehicleEntity vehicle, CruiseVehicleAccess access, CruiseRoute route, boolean clientSide) {
+        POST_LANDING_BRAKE.put(vehicle, POST_LANDING_BRAKE_TICKS);
+        LANDING_ACTIVE.put(vehicle, true);
+        FAST_LANDING_FINAL_BRAKE_ACTIVE.remove(vehicle);
+        tickPostLandingBrake(vehicle, access, route, POST_LANDING_BRAKE_TICKS, clientSide);
+    }
+
+    private static void tickPostLandingBrake(VehicleEntity vehicle, CruiseVehicleAccess access, CruiseRoute route, int ticks, boolean clientSide) {
+        if (ticks <= 0) {
+            finishLanding(vehicle, access, route, clientSide);
+            return;
+        }
+
+        stopBoostingImmediately(vehicle, access);
+        if (vehicle instanceof AirplaneEntity) {
+            setCruiseInputs(vehicle, 0.0f, -1.0f, 0.0f);
+        } else {
+            setCruiseInputs(vehicle, 0.0f, 0.0f, 0.0f);
+            vehicle.setDeltaMovement(brakedVelocity(vehicle, 0.86d));
+        }
+        if (vehicle instanceof EngineVehicle engineVehicle) {
+            engineVehicle.setEngineTarget(Math.max(0.0f, engineVehicle.getEngineTarget() - 0.1f));
+        }
+        POST_LANDING_BRAKE.put(vehicle, ticks - 1);
+    }
+
+    private static void tickCirclingDescent(VehicleEntity vehicle, CruiseRoute route, double altitudeError) {
+        float climbInput = altitudeInput(vehicle, altitudeError);
+        float turn = -1.0f;
+        if (vehicle instanceof AirplaneEntity) {
+            setCruiseInputs(vehicle, turn, -1.0f, Math.max(0.25f, -climbInput));
+        } else {
+            setCruiseInputs(vehicle, turn, climbInput, 1.0f);
+            vehicle.setYRot(vehicle.getYRot() - turn * 1.5f);
+        }
+        if (vehicle instanceof EngineVehicle engineVehicle) {
+            engineVehicle.setEngineTarget(Math.max(0.35f, engineVehicle.getEngineTarget() - 0.04f));
+        }
+    }
+
+    private static void brakeForLanding(VehicleEntity vehicle, double horizontalDistance) {
+        if (vehicle instanceof AirplaneEntity) {
+            return;
+        }
+        double factor = horizontalDistance <= WAYPOINT_RADIUS ? 0.88d : 0.94d;
+        vehicle.setDeltaMovement(brakedVelocity(vehicle, factor));
+        if (vehicle instanceof EngineVehicle engineVehicle) {
+            engineVehicle.setEngineTarget(Math.max(0.0f, engineVehicle.getEngineTarget() - 0.08f));
+        }
+    }
+
+    private static Vec3 brakedVelocity(VehicleEntity vehicle, double factor) {
+        Vec3 velocity = vehicle.getDeltaMovement();
+        double yFactor = vehicle instanceof AirplaneEntity ? 0.98d : factor;
+        return new Vec3(velocity.x * factor, velocity.y * yFactor, velocity.z * factor);
+    }
+
+    private static boolean isLandingComplete(VehicleEntity vehicle, CruiseRoute.Waypoint waypoint, int targetAltitude,
+                                             double horizontalRadius, double altitudeRadius, double stopSpeed) {
+        return isLandingComplete(vehicle, waypoint.x() + 0.5, waypoint.z() + 0.5, targetAltitude,
+                horizontalRadius, altitudeRadius, stopSpeed);
+    }
+
+    private static boolean isLandingComplete(VehicleEntity vehicle, double targetX, double targetZ, int targetAltitude,
+                                             double horizontalRadius, double altitudeRadius, double stopSpeed) {
+        return horizontalDistance(vehicle, targetX, targetZ) <= horizontalRadius
+                && Math.abs(vehicle.getY() - targetAltitude) <= altitudeRadius
+                && horizontalSpeed(vehicle) <= stopSpeed;
+    }
+
+    private static void finishLanding(VehicleEntity vehicle, CruiseVehicleAccess access, CruiseRoute route, boolean clientSide) {
+        route.setCurrentIndex(route.getSelectedEntry().waypoints().size() - 1);
+        route.setHoldingPattern(true);
+        route.stopNavigation();
+        setCruiseInputs(vehicle, 0.0f, 0.0f, 0.0f);
+        vehicle.setDeltaMovement(vehicle.getDeltaMovement().multiply(0.2d, 0.2d, 0.2d));
+        stopNavigationEffects(vehicle, access);
+        LANDING_ACTIVE.remove(vehicle);
+        POST_LANDING_BRAKE.remove(vehicle);
+        if (!clientSide) {
+            CruiseModuleData.write(vehicle, route);
+            syncRouteToClient(vehicle, route);
+        }
+    }
+
+    private static double brakingDecay(VehicleEntity vehicle) {
+        double factor = brakingFactor(vehicle);
+        if (vehicle instanceof InventoryVehicleEntity inventoryVehicle) {
+            double airDecay = 1.0d - inventoryVehicle.getProperties().get(VehicleStat.FRICTION);
+            double horizontalDecay = inventoryVehicle.getProperties().get(VehicleStat.HORIZONTAL_DECAY);
+            factor *= Mth.clamp(airDecay, 0.0d, 1.0d) * Mth.clamp(horizontalDecay, 0.0d, 1.0d);
+        }
+        return Mth.clamp(factor, 0.01d, 0.999d);
+    }
+
+    private static double brakingFactor(VehicleEntity vehicle) {
+        if (vehicle instanceof AirplaneEntity && vehicle instanceof InventoryVehicleEntity inventoryVehicle) {
+            VehicleStat brakeFactor = VehicleStat.STATS.get("brakeFactor");
+            if (brakeFactor != null) {
+                return Mth.clamp(inventoryVehicle.getProperties().get(brakeFactor), 0.80f, 0.995f);
+            }
+            return 0.95d;
+        }
+        return 0.94d;
+    }
+
+    private static FastLandingPlan fastLandingPlan(VehicleEntity vehicle, double horizontalDistance, double altitudeError) {
+        double descent = Math.max(0.0d, -altitudeError - FAST_LANDING_PLAN_ALTITUDE_RADIUS);
+        double currentSpeed = horizontalSpeed(vehicle);
+        StopEstimate stopEstimate = stoppingEstimate(vehicle, descent);
+        double activeDescent = descent;
+        double availableDescentDistance = Math.max(0.0d, horizontalDistance - FAST_LANDING_HORIZONTAL_RADIUS);
+        float boostTarget = 1.0f;
+        DescentEstimate descentEstimate = descentEstimate(vehicle, activeDescent, boostTarget);
+        for (int iteration = 0; iteration < 3; iteration++) {
+            boostTarget = fastLandingBoostTarget(availableDescentDistance, currentSpeed, activeDescent, descentEstimate.ticks());
+            descentEstimate = descentEstimate(vehicle, activeDescent, boostTarget);
+        }
+        double descentRate = descentEstimate.rate();
+        double descentTime = descentEstimate.ticks();
+        double descentDistance = descentEstimate.distance();
+        double stopDistance = stopEstimate.distance();
+        double stopTicks = stopEstimate.ticks();
+        boolean descend = descent > 0.0d && horizontalDistance <= descentDistance + FAST_LANDING_DESCENT_BUFFER;
+        boolean brake = horizontalDistance <= stopDistance + FAST_LANDING_BRAKE_BUFFER;
+        return new FastLandingPlan(descend, brake, currentSpeed, descent, activeDescent, descentRate, descentTime,
+                descentDistance, stopDistance, stopTicks, stopEstimate.descent(), boostTarget);
+    }
+
+    private static boolean shouldForceDescent(FastLandingPlan plan, FlareEstimate flareEstimate, boolean finalBrake) {
+        if (plan.descent() <= 0.0d) {
+            return false;
+        }
+        if (finalBrake) {
+            return plan.descent() > flareEstimate.descent();
+        }
+        return plan.activeDescent() > flareEstimate.descent();
+    }
+
+    private static StopEstimate stoppingEstimate(VehicleEntity vehicle, double descent) {
+        if (vehicle instanceof AirplaneEntity && vehicle instanceof EngineVehicle engineVehicle
+                && vehicle instanceof InventoryVehicleEntity inventoryVehicle) {
+            return simulatedAirplaneStoppingEstimate(vehicle, engineVehicle, inventoryVehicle, descent);
+        }
+        return geometricStoppingEstimate(vehicle);
+    }
+
+    private static FlareEstimate flareEstimate(VehicleEntity vehicle, double altitudeError, boolean braking, float targetBoostLevel,
+                                               double horizontalDistance, double stopTicks) {
+        double descent = Math.max(0.0d, -altitudeError - FAST_LANDING_PLAN_ALTITUDE_RADIUS);
+        if (descent <= 0.0d) {
+            return new FlareEstimate(0.0d, 0.0d);
+        }
+        double horizontalWindow = Math.max(0.0d, horizontalDistance - FAST_LANDING_HORIZONTAL_RADIUS);
+        double tickWindow = braking && stopTicks > 0.0d
+                ? Math.min(FAST_LANDING_FLARE_SIMULATION_TICKS, Math.ceil(stopTicks))
+                : FAST_LANDING_FLARE_SIMULATION_TICKS;
+        if (vehicle instanceof AirplaneEntity && vehicle instanceof EngineVehicle engineVehicle
+                && vehicle instanceof InventoryVehicleEntity inventoryVehicle) {
+            return simulatedAirplaneFlareEstimate(vehicle, engineVehicle, inventoryVehicle, descent, braking,
+                    targetBoostLevel, horizontalWindow, tickWindow);
+        }
+        double verticalSpeed = Math.max(0.0d, -vehicle.getDeltaMovement().y);
+        double ticks = verticalSpeed <= FAST_LANDING_FLARE_VERTICAL_SPEED ? 0.0d : verticalSpeed / FAST_LANDING_FLARE_VERTICAL_SPEED;
+        ticks = Math.min(ticks, tickWindow);
+        double speed = horizontalSpeed(vehicle);
+        if (speed > 1.0E-5d) {
+            ticks = Math.min(ticks, horizontalWindow / speed);
+        }
+        return new FlareEstimate(Math.min(descent, verticalSpeed * ticks * 0.5d), horizontalSpeed(vehicle) * ticks);
+    }
+
+    private static FlareEstimate simulatedAirplaneFlareEstimate(VehicleEntity vehicle, EngineVehicle engineVehicle,
+                                                                InventoryVehicleEntity inventoryVehicle, double targetDescent,
+                                                                boolean braking, float targetBoostLevel,
+                                                                double horizontalWindow, double tickWindow) {
+        if (horizontalWindow <= 0.0d) {
+            return new FlareEstimate(0.0d, 0.0d);
+        }
+        Vec3 forward = vehicle.toVec3d(vehicle.getForwardDirection());
+        if (forward.lengthSqr() <= 1.0E-8d) {
+            Vec3 velocity = vehicle.getDeltaMovement();
+            forward = new Vec3(velocity.x, 0.0d, velocity.z);
+        }
+        if (forward.lengthSqr() <= 1.0E-8d) {
+            return new FlareEstimate(0.0d, 0.0d);
+        }
+        forward = forward.normalize();
+
+        Vec3 velocity = vehicle.getDeltaMovement();
+        double enginePower = baseEnginePower(engineVehicle);
+        double engineStep = enginePowerStep(engineVehicle, inventoryVehicle);
+        double engineTarget = engineVehicle.getEngineTarget();
+        double boostLevel = braking ? 0.0d : nextPredictedBoostLevel(predictedCurrentBoostLevel(engineVehicle), targetBoostLevel);
+
+        double friction = inventoryVehicle.getProperties().get(VehicleStat.FRICTION);
+        double lift = inventoryVehicle.getProperties().get(VehicleStat.LIFT);
+        double horizontalDecay = inventoryVehicle.getProperties().get(VehicleStat.HORIZONTAL_DECAY);
+        double verticalDecay = inventoryVehicle.getProperties().get(VehicleStat.VERTICAL_DECAY);
+        double engineSpeed = inventoryVehicle.getProperties().get(VehicleStat.ENGINE_SPEED);
+        double pitchSpeed = inventoryVehicle.getProperties().get(VehicleStat.PITCH_SPEED);
+        double stabilizer = inventoryVehicle.getProperties().getAdditive(VehicleStat.STABILIZER);
+        double glideFactor = inventoryVehicle.getProperties().get(VehicleStat.GLIDE_FACTOR);
+        double brakeFactor = brakingFactor(vehicle);
+        double inputDecay = airplaneInputDecay(friction, inventoryVehicle);
+
+        double pitch = vehicle.getXRot();
+        double pitchInput = vehicle.pressingInterpolatedZ.getSmooth();
+        double targetPitchInput = -simulatedAltitudeInput(-targetDescent, velocity.y);
+        double dropped = 0.0d;
+        double distance = 0.0d;
+        int tickLimit = Mth.clamp((int) Math.ceil(tickWindow), 1, FAST_LANDING_FLARE_SIMULATION_TICKS);
+
+        for (int tick = 1; tick <= tickLimit; tick++) {
+            double effectiveEnginePower = boostedEnginePower(engineVehicle, enginePower, boostLevel);
+            velocity = simulateAirplaneVelocityStep(vehicle, velocity, forward, effectiveEnginePower, friction, lift,
+                    horizontalDecay, verticalDecay, glideFactor);
+            pitchInput *= inputDecay;
+
+            if (braking) {
+                engineTarget = Math.max(0.0d, engineTarget - 0.1d);
+                velocity = velocity.scale(brakeFactor);
+            }
+            pitch += pitchSpeed * pitchInput;
+            pitch *= 1.0d - stabilizer;
+            forward = forwardFromRotation(vehicle.getYRot(), pitch);
+            velocity = velocity.add(forward.scale(effectiveEnginePower * effectiveEnginePower * engineSpeed));
+
+            double verticalDrop = Math.max(0.0d, -velocity.y);
+            double horizontalStep = horizontalLength(velocity);
+            double stepRatio = 1.0d;
+            if (verticalDrop > 1.0E-8d && dropped + verticalDrop >= targetDescent) {
+                stepRatio = Math.min(stepRatio, (targetDescent - dropped) / verticalDrop);
+            }
+            if (horizontalStep > 1.0E-8d && distance + horizontalStep >= horizontalWindow) {
+                stepRatio = Math.min(stepRatio, (horizontalWindow - distance) / horizontalStep);
+            }
+            stepRatio = Mth.clamp(stepRatio, 0.0d, 1.0d);
+            dropped += verticalDrop * stepRatio;
+            distance += horizontalStep * stepRatio;
+
+            if (stepRatio < 1.0d || dropped >= targetDescent || verticalDrop <= FAST_LANDING_FLARE_VERTICAL_SPEED && pitchInput <= 0.0d) {
+                return new FlareEstimate(Math.min(dropped, targetDescent), distance);
+            }
+
+            enginePower = enginePower + ((braking ? engineTarget : 1.0d) - enginePower) * engineStep;
+            boostLevel = nextPredictedBoostLevel(boostLevel, braking ? 0.0d : targetBoostLevel);
+            pitchInput = pitchInput + (targetPitchInput - pitchInput) * 0.1d;
+            targetPitchInput = -simulatedAltitudeInput(-(targetDescent - dropped), velocity.y);
+        }
+
+        return new FlareEstimate(Math.min(dropped, targetDescent), distance);
+    }
+
+    private static double airplaneInputDecay(double friction, InventoryVehicleEntity inventoryVehicle) {
+        double decay = Mth.clamp(1.0d - friction, 0.0d, 1.0d);
+        double rotationDecay = inventoryVehicle.getProperties().get(VehicleStat.ROTATION_DECAY);
+        return Mth.clamp(decay * rotationDecay, 0.0d, 1.0d);
+    }
+
+    private static StopEstimate geometricStoppingEstimate(VehicleEntity vehicle) {
+        double speed = horizontalSpeed(vehicle);
+        if (speed <= LANDING_STOP_SPEED) {
+            return new StopEstimate(0.0d, 0.0d, 0.0d);
+        }
+        double factor = brakingDecay(vehicle);
+        double distance = speed * factor / Math.max(0.005d, 1.0d - factor);
+        distance += speed * FAST_LANDING_BRAKE_RESPONSE_TICKS;
+        double ticks = Mth.clamp(Math.log(LANDING_STOP_SPEED / speed) / Math.log(factor), 1.0d, 200.0d);
+        double safeDistance = Math.max(0.0d, distance - FAST_LANDING_HORIZONTAL_RADIUS) * FAST_LANDING_STOP_DISTANCE_SAFETY;
+        double descent = Math.max(0.0d, -vehicle.getDeltaMovement().y) * ticks;
+        return new StopEstimate(safeDistance, ticks, descent);
+    }
+
+    private static StopEstimate simulatedAirplaneStoppingEstimate(VehicleEntity vehicle, EngineVehicle engineVehicle,
+                                                                  InventoryVehicleEntity inventoryVehicle, double targetDescent) {
+        double initialSpeed = horizontalSpeed(vehicle);
+        if (initialSpeed <= LANDING_STOP_SPEED) {
+            return new StopEstimate(0.0d, 0.0d, 0.0d);
+        }
+
+        Vec3 forward = vehicle.toVec3d(vehicle.getForwardDirection());
+        if (forward.lengthSqr() <= 1.0E-8d) {
+            Vec3 velocity = vehicle.getDeltaMovement();
+            forward = new Vec3(velocity.x, 0.0d, velocity.z);
+        }
+        if (forward.lengthSqr() <= 1.0E-8d) {
+            return geometricStoppingEstimate(vehicle);
+        }
+        forward = forward.normalize();
+
+        Vec3 velocity = vehicle.getDeltaMovement();
+        double distance = 0.0d;
+        double bestDistance = 0.0d;
+        double bestTicks = 0.0d;
+        double bestSpeed = initialSpeed;
+        double dropped = 0.0d;
+        double bestDropped = 0.0d;
+        int plateauTicks = 0;
+
+        double engineTarget = engineVehicle.getEngineTarget();
+        double enginePower = baseEnginePower(engineVehicle);
+        double engineStep = enginePowerStep(engineVehicle, inventoryVehicle);
+        double boostLevel = 0.0d;
+
+        double friction = inventoryVehicle.getProperties().get(VehicleStat.FRICTION);
+        double lift = inventoryVehicle.getProperties().get(VehicleStat.LIFT);
+        double horizontalDecay = inventoryVehicle.getProperties().get(VehicleStat.HORIZONTAL_DECAY);
+        double verticalDecay = inventoryVehicle.getProperties().get(VehicleStat.VERTICAL_DECAY);
+        double engineSpeed = inventoryVehicle.getProperties().get(VehicleStat.ENGINE_SPEED);
+        double brakeFactor = brakingFactor(vehicle);
+        double glideFactor = inventoryVehicle.getProperties().get(VehicleStat.GLIDE_FACTOR);
+        double yaw = vehicle.getYRot();
+        double pitch = vehicle.getXRot();
+        double turnInput = vehicle.pressingInterpolatedX.getSmooth();
+        double pitchInput = vehicle.pressingInterpolatedZ.getSmooth();
+        double pitchSpeed = inventoryVehicle.getProperties().get(VehicleStat.PITCH_SPEED);
+        double yawSpeed = inventoryVehicle.getProperties().get(VehicleStat.YAW_SPEED);
+        double stabilizer = inventoryVehicle.getProperties().getAdditive(VehicleStat.STABILIZER);
+
+        for (int tick = 1; tick <= FAST_LANDING_BRAKE_SIMULATION_TICKS; tick++) {
+            double effectiveEnginePower = boostedEnginePower(engineVehicle, enginePower, boostLevel);
+            velocity = simulateAirplaneVelocityStep(vehicle, velocity, forward, effectiveEnginePower, friction, lift,
+                    horizontalDecay, verticalDecay, glideFactor);
+
+            engineTarget = Math.max(0.0d, engineTarget - 0.1d);
+            velocity = velocity.scale(brakeFactor);
+            yaw -= yawSpeed * turnInput;
+            pitch += pitchSpeed * pitchInput;
+            pitch *= 1.0d - stabilizer;
+            forward = forwardFromRotation(yaw, pitch);
+            velocity = velocity.add(forward.scale(effectiveEnginePower * effectiveEnginePower * engineSpeed));
+
+            double speed = horizontalLength(velocity);
+            distance += speed;
+            dropped += Math.max(0.0d, -velocity.y);
+
+            if (speed < bestSpeed - FAST_LANDING_BRAKE_PLATEAU_DELTA) {
+                bestSpeed = speed;
+                bestDistance = distance;
+                bestTicks = tick;
+                bestDropped = dropped;
+                plateauTicks = 0;
+            } else if (engineTarget <= 0.001d && enginePower <= 0.05d) {
+                plateauTicks++;
+            }
+
+            if (plateauTicks >= FAST_LANDING_BRAKE_PLATEAU_TICKS) {
+                return safeStopEstimate(bestDistance, bestTicks, bestDropped, targetDescent);
+            }
+
+            enginePower = enginePower + (engineTarget - enginePower) * engineStep;
+            boostLevel = nextPredictedBoostLevel(boostLevel, 0.0d);
+        }
+
+        return bestDistance > 0.0d ? safeStopEstimate(bestDistance, bestTicks, bestDropped, targetDescent) : geometricStoppingEstimate(vehicle);
+    }
+
+    private static StopEstimate safeStopEstimate(double distance, double ticks, double descent, double targetDescent) {
+        double safeDistance = Math.max(0.0d, distance - FAST_LANDING_HORIZONTAL_RADIUS) * FAST_LANDING_STOP_DISTANCE_SAFETY;
+        return new StopEstimate(safeDistance, Math.max(1.0d, ticks), Math.min(Math.max(0.0d, descent), targetDescent));
+    }
+
+    private static DescentEstimate descentEstimate(VehicleEntity vehicle, double descent, float targetBoostLevel) {
+        if (descent <= 0.0d) {
+            return new DescentEstimate(0.0d, 0.0d, expectedDescentRate(vehicle));
+        }
+        if (vehicle instanceof AirplaneEntity && vehicle instanceof EngineVehicle engineVehicle
+                && vehicle instanceof InventoryVehicleEntity inventoryVehicle) {
+            return simulatedAirplaneDescentEstimate(vehicle, engineVehicle, inventoryVehicle, descent, targetBoostLevel);
+        }
+        double descentRate = expectedDescentRate(vehicle);
+        double ticks = descent / descentRate;
+        double distance = horizontalSpeed(vehicle) * ticks;
+        return new DescentEstimate(distance, ticks, descentRate);
+    }
+
+    private static DescentEstimate simulatedAirplaneDescentEstimate(VehicleEntity vehicle, EngineVehicle engineVehicle,
+                                                                    InventoryVehicleEntity inventoryVehicle, double descent,
+                                                                    float targetBoostLevel) {
+        Vec3 forward = vehicle.toVec3d(vehicle.getForwardDirection());
+        if (forward.lengthSqr() <= 1.0E-8d) {
+            Vec3 velocity = vehicle.getDeltaMovement();
+            forward = new Vec3(velocity.x, 0.0d, velocity.z);
+        }
+        if (forward.lengthSqr() <= 1.0E-8d) {
+            double fallbackRate = expectedDescentRate(vehicle);
+            double fallbackTicks = descent / fallbackRate;
+            return new DescentEstimate(horizontalSpeed(vehicle) * fallbackTicks, fallbackTicks, fallbackRate);
+        }
+        forward = forward.normalize();
+
+        Vec3 velocity = vehicle.getDeltaMovement();
+        double engineTarget = Math.max(1.0d, engineVehicle.getEngineTarget());
+        double enginePower = baseEnginePower(engineVehicle);
+        double engineStep = enginePowerStep(engineVehicle, inventoryVehicle);
+        double boostLevel = nextPredictedBoostLevel(predictedCurrentBoostLevel(engineVehicle), targetBoostLevel);
+
+        double friction = inventoryVehicle.getProperties().get(VehicleStat.FRICTION);
+        double lift = inventoryVehicle.getProperties().get(VehicleStat.LIFT);
+        double horizontalDecay = inventoryVehicle.getProperties().get(VehicleStat.HORIZONTAL_DECAY);
+        double verticalDecay = inventoryVehicle.getProperties().get(VehicleStat.VERTICAL_DECAY);
+        double engineSpeed = inventoryVehicle.getProperties().get(VehicleStat.ENGINE_SPEED);
+        double pitchSpeed = inventoryVehicle.getProperties().get(VehicleStat.PITCH_SPEED);
+        double stabilizer = inventoryVehicle.getProperties().getAdditive(VehicleStat.STABILIZER);
+        double glideFactor = inventoryVehicle.getProperties().get(VehicleStat.GLIDE_FACTOR);
+        double inputDecay = airplaneInputDecay(friction, inventoryVehicle);
+
+        double pitch = vehicle.getXRot();
+        double pitchInput = vehicle.pressingInterpolatedZ.getSmooth();
+        double dropped = 0.0d;
+        double distance = 0.0d;
+
+        for (int tick = 1; tick <= FAST_LANDING_DESCENT_SIMULATION_TICKS; tick++) {
+            double effectiveEnginePower = boostedEnginePower(engineVehicle, enginePower, boostLevel);
+            velocity = simulateAirplaneVelocityStep(vehicle, velocity, forward, effectiveEnginePower, friction, lift,
+                    horizontalDecay, verticalDecay, glideFactor);
+            pitchInput *= inputDecay;
+
+            pitch += pitchSpeed * pitchInput;
+            pitch *= 1.0d - stabilizer;
+            forward = forwardFromRotation(vehicle.getYRot(), pitch);
+            velocity = velocity.add(forward.scale(effectiveEnginePower * effectiveEnginePower * engineSpeed));
+
+            double verticalDrop = Math.max(0.0d, -velocity.y);
+            dropped += verticalDrop;
+            distance += horizontalLength(velocity);
+
+            if (dropped >= descent) {
+                return new DescentEstimate(Math.max(0.0d, distance), tick, Math.max(MIN_AIRPLANE_DESCENT_RATE, descent / tick));
+            }
+
+            engineTarget = 1.0d;
+            enginePower = enginePower + (engineTarget - enginePower) * engineStep;
+            boostLevel = nextPredictedBoostLevel(boostLevel, targetBoostLevel);
+            pitchInput = pitchInput + (FAST_DESCENT_AIRPLANE_PITCH - pitchInput) * 0.1d;
+        }
+
+        double averageRate = dropped / Math.max(1.0d, FAST_LANDING_DESCENT_SIMULATION_TICKS);
+        double fallbackRate = Math.max(MIN_AIRPLANE_DESCENT_RATE, averageRate);
+        double remainingTicks = Math.max(0.0d, descent - dropped) / fallbackRate;
+        double averageSpeed = distance / Math.max(1.0d, FAST_LANDING_DESCENT_SIMULATION_TICKS);
+        double fallbackTicks = FAST_LANDING_DESCENT_SIMULATION_TICKS + remainingTicks;
+        return new DescentEstimate(distance + averageSpeed * remainingTicks, fallbackTicks, fallbackRate);
+    }
+
+    private static Vec3 simulateAirplaneVelocityStep(VehicleEntity vehicle, Vec3 velocity, Vec3 forward, double enginePower,
+                                                     double friction, double lift, double horizontalDecay,
+                                                     double verticalDecay, double glideFactor) {
+        double descent = Math.max(0.0d, -velocity.y);
+        if (glideFactor > 0.0d && descent > 0.0d) {
+            velocity = velocity.add(forward.scale(descent * glideFactor * (1.0d - Math.abs(forward.y))));
+        }
+
+        double speed = velocity.length();
+        if (speed > 1.0E-8d) {
+            Vec3 normalized = velocity.normalize();
+            double drag = Math.abs(forward.dot(normalized));
+            velocity = normalized.lerp(forward, lift)
+                    .scale(speed * (drag * friction + (1.0d - friction)));
+        }
+
+        double decay = Mth.clamp(1.0d - friction, 0.0d, 1.0d);
+        double gravity = simulatedAirplaneGravity(vehicle, velocity, forward, enginePower);
+        return new Vec3(
+                velocity.x * decay * horizontalDecay,
+                velocity.y * decay * verticalDecay + gravity,
+                velocity.z * decay * horizontalDecay
+        );
+    }
+
+    private static double simulatedAirplaneGravity(VehicleEntity vehicle, Vec3 velocity, Vec3 forward, double enginePower) {
+        double horizontalDirection = 1.0d - Math.abs(forward.y);
+        double gravity = Math.max(0.0d, 1.0d - velocity.length() * horizontalDirection * 1.5d) * -0.04d;
+        if ("bamboo_hopper".equals(vehicle.identifier.getPath())) {
+            gravity *= 1.0d - enginePower;
+        }
+        return gravity;
+    }
+
+    private static double baseEnginePower(EngineVehicle engineVehicle) {
+        return engineVehicle.enginePower.getSmooth() * Math.sqrt(engineVehicle.getFuelUtilization());
+    }
+
+    private static double boostedEnginePower(EngineVehicle engineVehicle, double enginePower, double boostLevel) {
+        if (usesControlledBoost(engineVehicle)) {
+            return enginePower;
+        }
+        return enginePower * (1.0d + Mth.clamp((float) boostLevel, 0.0f, 1.0f));
+    }
+
+    private static double predictedCurrentBoostLevel(EngineVehicle engineVehicle) {
+        if (usesControlledBoost(engineVehicle) || !(engineVehicle instanceof CruiseVehicleAccess access)) {
+            return 0.0d;
+        }
+        return Mth.clamp(boostLevel(engineVehicle, access), 0.0f, 1.0f);
+    }
+
+    private static double nextPredictedBoostLevel(double current, double target) {
+        double clampedTarget = Mth.clamp((float) target, 0.0f, 1.0f);
+        double step = current < clampedTarget ? BOOST_RISE_PER_TICK : BOOST_FALL_PER_TICK;
+        if (current < clampedTarget) {
+            return Math.min(clampedTarget, current + step);
+        }
+        return Math.max(clampedTarget, current - step);
+    }
+
+    private static double enginePowerStep(EngineVehicle engineVehicle, InventoryVehicleEntity inventoryVehicle) {
+        double reactionSpeed = "airship".equals(engineVehicle.identifier.getPath())
+                || "cargo_airship".equals(engineVehicle.identifier.getPath())
+                || "warship".equals(engineVehicle.identifier.getPath()) ? 50.0d : 20.0d;
+        double acceleration = inventoryVehicle.getProperties().get(VehicleStat.ACCELERATION);
+        return Mth.clamp(acceleration / reactionSpeed, 0.01d, 1.0d);
+    }
+
+    private static double horizontalLength(Vec3 velocity) {
+        return Math.sqrt(velocity.x * velocity.x + velocity.z * velocity.z);
+    }
+
+    private static Vec3 forwardFromRotation(double yaw, double pitch) {
+        double yawRadians = -yaw * Math.PI / 180.0d;
+        double pitchRadians = pitch * Math.PI / 180.0d;
+        double x = Math.sin(yawRadians) * Math.cos(pitchRadians);
+        double y = -Math.sin(pitchRadians);
+        double z = Math.cos(yawRadians) * Math.cos(pitchRadians);
+        return new Vec3(x, y, z).normalize();
+    }
+
+    private static float simulatedAltitudeInput(double altitudeError, double verticalSpeed) {
+        double predictedError = altitudeError - verticalSpeed * ALTITUDE_LOOKAHEAD_TICKS;
+        if (Math.abs(altitudeError) <= ALTITUDE_DEAD_ZONE && Math.abs(verticalSpeed) <= ALTITUDE_RATE_DEAD_ZONE) {
+            return 0.0f;
+        }
+        return Mth.clamp((float) (predictedError / ALTITUDE_CONTROL_RANGE), -ALTITUDE_MAX_INPUT, ALTITUDE_MAX_INPUT);
+    }
+
+    private static double expectedDescentRate(VehicleEntity vehicle) {
+        double verticalRate = vehicle instanceof AirplaneEntity ? MIN_AIRPLANE_DESCENT_RATE : MIN_DESCENT_RATE;
+        if (vehicle instanceof AirplaneEntity) {
+            verticalRate = Math.max(verticalRate, horizontalSpeed(vehicle) * AIRPLANE_ACTIVE_DESCENT_SPEED_FACTOR);
+        }
+        if (vehicle instanceof Rotorcraft) {
+            verticalRate = MIN_ROTORCRAFT_DESCENT_RATE;
+        }
+        if (vehicle instanceof InventoryVehicleEntity inventoryVehicle) {
+            verticalRate = Math.max(verticalRate, inventoryVehicle.getProperties().get(VehicleStat.VERTICAL_SPEED) * ROTORCRAFT_ACTIVE_DESCENT_PROPERTY_FACTOR);
+        }
+        if (vehicle.getDeltaMovement().y < 0.0d) {
+            verticalRate = Math.max(verticalRate, Math.abs(vehicle.getDeltaMovement().y));
+        }
+        return verticalRate;
+    }
+
+    private static double horizontalSpeed(VehicleEntity vehicle) {
+        Vec3 velocity = vehicle.getDeltaMovement();
+        return Math.sqrt(velocity.x * velocity.x + velocity.z * velocity.z);
+    }
+
+    private static boolean isVerticalAircraft(VehicleEntity vehicle) {
+        return vehicle instanceof Rotorcraft;
+    }
+
+    private static float fastLandingBoostTarget(double availableDistance, double currentSpeed, double activeDescent, double descentTime) {
+        if (activeDescent <= 0.0d || descentTime <= 0.0d || currentSpeed <= 0.0d) {
+            return 1.0f;
+        }
+        double allowedSpeed = availableDistance / descentTime;
+        if (currentSpeed <= allowedSpeed * (1.0d + FAST_LANDING_SPEED_DEAD_ZONE)) {
+            return 1.0f;
+        }
+        double ratio = Mth.clamp(allowedSpeed / currentSpeed, 0.0d, 1.0d);
+        return Mth.clamp((float) ((ratio - 0.5d) / 0.5d), FAST_LANDING_MIN_CRUISE_BOOST, 1.0f);
+    }
+
+    private record FastLandingPlan(boolean descend, boolean brake, double currentSpeed, double descent, double activeDescent,
+                                   double descentRate, double descentTime, double descentDistance, double stopDistance,
+                                   double stopTicks, double stopDescent, float boostTarget) {
+    }
+
+    private record StopEstimate(double distance, double ticks, double descent) {
+    }
+
+    private record FlareEstimate(double descent, double distance) {
+    }
+
+    private record DescentEstimate(double distance, double ticks, double rate) {
+    }
+
+    private record LandingTarget(double x, double z) {
+    }
+
     private static double horizontalDistance(VehicleEntity vehicle, CruiseRoute.Waypoint waypoint) {
-        double dx = waypoint.x() + 0.5 - vehicle.getX();
-        double dz = waypoint.z() + 0.5 - vehicle.getZ();
+        return horizontalDistance(vehicle, waypoint.x() + 0.5, waypoint.z() + 0.5);
+    }
+
+    private static double horizontalDistance(VehicleEntity vehicle, double targetX, double targetZ) {
+        double dx = targetX - vehicle.getX();
+        double dz = targetZ - vehicle.getZ();
         return Math.sqrt(dx * dx + dz * dz);
+    }
+
+    private static LandingTarget fastLandingTarget(VehicleEntity vehicle, CruiseRoute route, CruiseRoute.Waypoint waypoint) {
+        double targetX = waypoint.x() + 0.5;
+        double targetZ = waypoint.z() + 0.5;
+        CruiseRoute.Waypoint previous = previousWaypoint(route, waypoint);
+        if (previous == null) {
+            return new LandingTarget(targetX, targetZ);
+        }
+
+        double pathX = targetX - (previous.x() + 0.5);
+        double pathZ = targetZ - (previous.z() + 0.5);
+        double pathLength = Math.sqrt(pathX * pathX + pathZ * pathZ);
+        if (pathLength <= 1.0E-5d) {
+            return new LandingTarget(targetX, targetZ);
+        }
+        double reserve = Math.min(fastLandingTouchdownSlideReserve(vehicle), Math.max(0.0d, pathLength - FAST_LANDING_HORIZONTAL_RADIUS));
+        return new LandingTarget(targetX - pathX / pathLength * reserve, targetZ - pathZ / pathLength * reserve);
+    }
+
+    private static double fastLandingTouchdownSlideReserve(VehicleEntity vehicle) {
+        String id = vehicle.identifier.getPath();
+        return switch (id) {
+            case "bamboo_hopper" -> BAMBOO_HOPPER_TOUCHDOWN_SLIDE_RESERVE;
+            case "biplane" -> BIPLANE_TOUCHDOWN_SLIDE_RESERVE;
+            default -> 0.0d;
+        };
+    }
+
+    private static CruiseRoute.Waypoint previousWaypoint(CruiseRoute route, CruiseRoute.Waypoint waypoint) {
+        int index = route.getCurrentIndex();
+        if (index > 0) {
+            return route.getSelectedEntry().waypoints().get(index - 1);
+        }
+        CruiseRoute.Waypoint start = route.getStartPoint();
+        if (start != null && (start.x() != waypoint.x() || start.z() != waypoint.z())) {
+            return start;
+        }
+        return null;
+    }
+
+    private static boolean updateInitialAltitudeProgress(VehicleEntity vehicle, CruiseRoute route) {
+        if (!route.isHoldingPattern() && !route.isInitialAltitudeReached()
+                && Math.abs(route.getSelectedEntry().defaultAltitude() - vehicle.getY()) <= ALTITUDE_DEAD_ZONE) {
+            route.setInitialAltitudeReached(true);
+            return true;
+        }
+        return false;
     }
 
     private static boolean shouldBoost(CruiseVehicleAccess access, float yawError, double altitudeError, boolean awayFromFinal) {
@@ -288,11 +1131,7 @@ public final class CruiseController {
 
     private static float altitudeInput(VehicleEntity vehicle, double altitudeError) {
         double verticalSpeed = vehicle.getDeltaMovement().y;
-        double predictedError = altitudeError - verticalSpeed * ALTITUDE_LOOKAHEAD_TICKS;
-        float targetInput = Mth.clamp((float) (predictedError / ALTITUDE_CONTROL_RANGE), -ALTITUDE_MAX_INPUT, ALTITUDE_MAX_INPUT);
-        if (Math.abs(altitudeError) <= ALTITUDE_DEAD_ZONE && Math.abs(verticalSpeed) <= ALTITUDE_RATE_DEAD_ZONE) {
-            targetInput = 0.0f;
-        }
+        float targetInput = simulatedAltitudeInput(altitudeError, verticalSpeed);
 
         float previousInput = ALTITUDE_MEMORY.getOrDefault(vehicle, 0.0f);
         float smoothing = Math.signum(previousInput) == Math.signum(targetInput) ? ALTITUDE_SMOOTHING : ALTITUDE_SMOOTHING * 1.35f;
@@ -305,10 +1144,28 @@ public final class CruiseController {
         return input;
     }
 
+    private static void setCruiseInputs(VehicleEntity vehicle, float movementX, float movementY, float movementZ) {
+        if (movementY < -0.01f) {
+            AUTO_BRAKE_INPUT.put(vehicle, true);
+        }
+        vehicle.setInputs(movementX, movementY, movementZ);
+    }
+
     private static void setBoosting(VehicleEntity vehicle, CruiseVehicleAccess access, boolean boosting) {
+        setBoosting(vehicle, access, boosting, boosting ? 1.0f : 0.0f);
+    }
+
+    private static void setBoosting(VehicleEntity vehicle, CruiseVehicleAccess access, boolean boosting, float targetBoostLevel) {
         access.iacruise$setBoosting(boosting);
         if (vehicle instanceof EngineVehicle engineVehicle) {
-            updateBoostLevel(engineVehicle, boosting);
+            updateBoostLevel(engineVehicle, boosting ? targetBoostLevel : 0.0f, boosting);
+        }
+    }
+
+    private static void stopBoostingImmediately(VehicleEntity vehicle, CruiseVehicleAccess access) {
+        access.iacruise$setBoosting(false);
+        if (vehicle instanceof EngineVehicle engineVehicle) {
+            BOOST_LEVEL.remove(engineVehicle);
         }
     }
 
@@ -319,22 +1176,34 @@ public final class CruiseController {
         }
         TURN_MEMORY.remove(vehicle);
         ALTITUDE_MEMORY.remove(vehicle);
+        LANDING_ACTIVE.remove(vehicle);
+        FAST_LANDING_FINAL_BRAKE_ACTIVE.remove(vehicle);
+        AUTO_BRAKE_INPUT.remove(vehicle);
+        POST_LANDING_BRAKE.remove(vehicle);
     }
 
-    private static void updateBoostLevel(EngineVehicle vehicle, boolean boosting) {
+    private static void updateBoostLevel(EngineVehicle vehicle, float target, boolean keepZero) {
         float current = BOOST_LEVEL.getOrDefault(vehicle, 0.0f);
-        float target = boosting ? 1.0f : 0.0f;
-        float step = boosting ? BOOST_RISE_PER_TICK : BOOST_FALL_PER_TICK;
+        target = Mth.clamp(target, 0.0f, 1.0f);
+        float step = current < target ? BOOST_RISE_PER_TICK : BOOST_FALL_PER_TICK;
         float next = current < target ? Math.min(target, current + step) : Math.max(target, current - step);
         if (next <= 0.001f) {
-            BOOST_LEVEL.remove(vehicle);
+            if (keepZero) {
+                BOOST_LEVEL.put(vehicle, 0.0f);
+            } else {
+                BOOST_LEVEL.remove(vehicle);
+            }
         } else {
             BOOST_LEVEL.put(vehicle, next);
         }
     }
 
     private static float boostLevel(EngineVehicle vehicle, CruiseVehicleAccess access) {
-        return BOOST_LEVEL.getOrDefault(vehicle, access.iacruise$isBoosting() ? 1.0f : 0.0f);
+        Float level = BOOST_LEVEL.get(vehicle);
+        if (level != null) {
+            return level;
+        }
+        return access.iacruise$isBoosting() ? 1.0f : 0.0f;
     }
 
     private static boolean usesControlledBoost(EngineVehicle vehicle) {
@@ -397,6 +1266,24 @@ public final class CruiseController {
         return sign * Mth.clamp(magnitude / 45.0f, 0.0f, 1.0f);
     }
 
+    private static float fastLandingTurnInput(VehicleEntity vehicle, float yawError, double horizontalDistance) {
+        float magnitude = Math.abs(yawError);
+        double lateralError = Math.sin(Math.toRadians(magnitude)) * horizontalDistance;
+        if (magnitude <= FAST_LANDING_YAW_DEAD_ZONE && lateralError <= FAST_LANDING_LATERAL_DEAD_ZONE) {
+            TURN_MEMORY.remove(vehicle);
+            return 0.0f;
+        }
+
+        float sign;
+        if (magnitude >= YAW_REVERSE_ZONE) {
+            sign = TURN_MEMORY.getOrDefault(vehicle, 1.0f);
+        } else {
+            sign = Math.signum(yawError);
+        }
+        TURN_MEMORY.put(vehicle, sign);
+        return sign * Mth.clamp(magnitude / 18.0f, FAST_LANDING_MIN_TURN_INPUT, 1.0f);
+    }
+
     private static void syncRouteToClient(VehicleEntity vehicle, CruiseRoute route) {
         if (!(vehicle.getControllingPassenger() instanceof ServerPlayer player)) {
             return;
@@ -457,6 +1344,7 @@ public final class CruiseController {
             waypoint = route.getFinalTarget();
         }
         int altitude = route.isHoldingPattern()
+                || LANDING_ACTIVE.containsKey(vehicle)
                 ? route.getFinalAltitude()
                 : route.getTargetAltitude();
         return waypoint == null ? null : new Vec3(waypoint.x() + 0.5, altitude, waypoint.z() + 0.5);

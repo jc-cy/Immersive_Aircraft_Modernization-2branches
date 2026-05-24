@@ -15,19 +15,26 @@ public class CruiseRoute {
     private boolean enabled;
     private boolean holdingPattern;
     private boolean hudEnabled;
+    private boolean initialAltitudeReached;
     private int selectedRoute;
     private int currentIndex;
     private Waypoint startPoint;
     private final List<RouteEntry> routes;
 
     public CruiseRoute(boolean enabled, boolean holdingPattern, boolean hudEnabled, int selectedRoute, int currentIndex, List<RouteEntry> routes) {
-        this(enabled, holdingPattern, hudEnabled, selectedRoute, currentIndex, null, routes);
+        this(enabled, holdingPattern, hudEnabled, selectedRoute, currentIndex, null, currentIndex > 0 || holdingPattern, routes);
     }
 
     public CruiseRoute(boolean enabled, boolean holdingPattern, boolean hudEnabled, int selectedRoute, int currentIndex, Waypoint startPoint, List<RouteEntry> routes) {
+        this(enabled, holdingPattern, hudEnabled, selectedRoute, currentIndex, startPoint, currentIndex > 0 || holdingPattern, routes);
+    }
+
+    public CruiseRoute(boolean enabled, boolean holdingPattern, boolean hudEnabled, int selectedRoute, int currentIndex, Waypoint startPoint,
+                       boolean initialAltitudeReached, List<RouteEntry> routes) {
         this.enabled = enabled;
         this.holdingPattern = holdingPattern;
         this.hudEnabled = hudEnabled;
+        this.initialAltitudeReached = initialAltitudeReached;
         this.selectedRoute = Math.max(0, selectedRoute);
         this.currentIndex = Math.max(0, currentIndex);
         this.startPoint = startPoint;
@@ -44,7 +51,7 @@ public class CruiseRoute {
     }
 
     public CruiseRoute copy() {
-        return new CruiseRoute(enabled, holdingPattern, hudEnabled, selectedRoute, currentIndex, startPoint, routes);
+        return new CruiseRoute(enabled, holdingPattern, hudEnabled, selectedRoute, currentIndex, startPoint, initialAltitudeReached, routes);
     }
 
     public boolean isEnabled() {
@@ -72,6 +79,9 @@ public class CruiseRoute {
 
     public void setHoldingPattern(boolean holdingPattern) {
         this.holdingPattern = holdingPattern;
+        if (holdingPattern) {
+            initialAltitudeReached = true;
+        }
     }
 
     public boolean isHudEnabled() {
@@ -99,6 +109,14 @@ public class CruiseRoute {
     public void setCurrentIndex(int currentIndex) {
         this.currentIndex = Math.max(0, currentIndex);
         clampCurrentIndex();
+    }
+
+    public boolean isInitialAltitudeReached() {
+        return initialAltitudeReached;
+    }
+
+    public void setInitialAltitudeReached(boolean initialAltitudeReached) {
+        this.initialAltitudeReached = initialAltitudeReached;
     }
 
     public Waypoint getStartPoint() {
@@ -215,12 +233,56 @@ public class CruiseRoute {
         if (target == null) {
             target = getCurrentWaypoint();
         }
-        return target != null && target.hasAltitudeOverride() ? target.altitude() : getSelectedEntry().defaultAltitude();
+        if (target == null) {
+            return getSelectedEntry().defaultAltitude();
+        }
+        if (!initialAltitudeReached) {
+            return getSelectedEntry().defaultAltitude();
+        }
+        return altitudeFor(target);
     }
 
     public int getFinalAltitude() {
+        RouteEntry entry = getSelectedEntry();
+        if (getEffectiveLandingMode() != LandingMode.HOLDING_PATTERN && entry.hasLandingAltitude()) {
+            return entry.landingAltitude();
+        }
+        return getFinalFlightAltitude();
+    }
+
+    public int getFinalFlightAltitude() {
         Waypoint finalTarget = getFinalTarget();
-        return finalTarget != null && finalTarget.hasAltitudeOverride() ? finalTarget.altitude() : getSelectedEntry().defaultAltitude();
+        return finalTarget != null ? altitudeFor(finalTarget) : getSelectedEntry().defaultAltitude();
+    }
+
+    public int getSegmentStartAltitude() {
+        RouteEntry entry = getSelectedEntry();
+        if (currentIndex <= 0 || entry.waypoints().isEmpty()) {
+            return entry.defaultAltitude();
+        }
+        int previousIndex = Math.min(currentIndex - 1, entry.waypoints().size() - 1);
+        return altitudeFor(entry.waypoints().get(previousIndex));
+    }
+
+    public int altitudeFor(Waypoint waypoint) {
+        return waypoint != null && waypoint.hasAltitudeOverride() ? waypoint.altitude() : getSelectedEntry().defaultAltitude();
+    }
+
+    public boolean isFinalTarget() {
+        return hasTarget() && currentIndex == getSelectedEntry().waypoints().size() - 1;
+    }
+
+    public LandingMode getLandingMode() {
+        return getSelectedEntry().landingMode();
+    }
+
+    public LandingMode getEffectiveLandingMode() {
+        LandingMode mode = getLandingMode();
+        return mode.requiresFinalAltitude() && !hasFinalAltitudeOverride() ? LandingMode.HOLDING_PATTERN : mode;
+    }
+
+    public boolean hasFinalAltitudeOverride() {
+        return getSelectedEntry().hasLandingAltitude();
     }
 
     public void advance() {
@@ -228,6 +290,7 @@ public class CruiseRoute {
         if (currentIndex >= getSelectedEntry().waypoints().size()) {
             holdingPattern = true;
             currentIndex = Math.max(0, getSelectedEntry().waypoints().size() - 1);
+            initialAltitudeReached = true;
         }
     }
 
@@ -235,6 +298,7 @@ public class CruiseRoute {
         currentIndex = 0;
         holdingPattern = false;
         startPoint = null;
+        initialAltitudeReached = false;
         if (getSelectedEntry().waypoints().isEmpty()) {
             enabled = false;
         }
@@ -252,6 +316,7 @@ public class CruiseRoute {
         holdingPattern = source.holdingPattern;
         currentIndex = source.currentIndex;
         startPoint = source.startPoint;
+        initialAltitudeReached = source.initialAltitudeReached;
         clampCurrentIndex();
     }
 
@@ -266,6 +331,7 @@ public class CruiseRoute {
         if (size == 0) {
             currentIndex = 0;
             holdingPattern = false;
+            initialAltitudeReached = false;
         } else if (currentIndex >= size) {
             currentIndex = size - 1;
         }
@@ -281,6 +347,7 @@ public class CruiseRoute {
         if (startPoint != null) {
             startPoint.write(buffer);
         }
+        buffer.writeBoolean(initialAltitudeReached);
         buffer.writeInt(routes.size());
         for (RouteEntry route : routes) {
             route.write(buffer);
@@ -294,12 +361,13 @@ public class CruiseRoute {
         int selectedRoute = buffer.readInt();
         int currentIndex = buffer.readInt();
         Waypoint startPoint = buffer.readBoolean() ? Waypoint.read(buffer) : null;
+        boolean initialAltitudeReached = buffer.readBoolean();
         int size = Math.min(buffer.readInt(), MAX_ROUTES);
         List<RouteEntry> routes = new ArrayList<>(size);
         for (int i = 0; i < size; i++) {
             routes.add(RouteEntry.read(buffer));
         }
-        return new CruiseRoute(enabled, holdingPattern, hudEnabled, selectedRoute, currentIndex, startPoint, routes);
+        return new CruiseRoute(enabled, holdingPattern, hudEnabled, selectedRoute, currentIndex, startPoint, initialAltitudeReached, routes);
     }
 
     public CompoundTag toTag() {
@@ -312,6 +380,7 @@ public class CruiseRoute {
         if (startPoint != null) {
             tag.put("StartPoint", startPoint.toTag());
         }
+        tag.putBoolean("InitialAltitudeReached", initialAltitudeReached);
         ListTag list = new ListTag();
         for (RouteEntry route : routes) {
             list.add(route.toTag());
@@ -337,6 +406,9 @@ public class CruiseRoute {
                 tag.getInt("SelectedRoute"),
                 tag.getInt("CurrentIndex"),
                 tag.contains("StartPoint", Tag.TAG_COMPOUND) ? Waypoint.fromTag(tag.getCompound("StartPoint")) : null,
+                tag.contains("InitialAltitudeReached", Tag.TAG_BYTE)
+                        ? tag.getBoolean("InitialAltitudeReached")
+                        : tag.getInt("CurrentIndex") > 0 || tag.getBoolean("HoldingPattern"),
                 routes
         );
     }
@@ -345,21 +417,80 @@ public class CruiseRoute {
         return "Route " + index;
     }
 
-    public record RouteEntry(String name, int defaultAltitude, List<Waypoint> waypoints) {
+    public enum LandingMode {
+        HOLDING_PATTERN(0, "holding_pattern"),
+        FASTEST(1, "fastest"),
+        VERTICAL(2, "vertical");
+
+        private final int id;
+        private final String serializedName;
+
+        LandingMode(int id, String serializedName) {
+            this.id = id;
+            this.serializedName = serializedName;
+        }
+
+        public int id() {
+            return id;
+        }
+
+        public String serializedName() {
+            return serializedName;
+        }
+
+        public boolean requiresFinalAltitude() {
+            return this != HOLDING_PATTERN;
+        }
+
+        public static LandingMode byId(int id) {
+            for (LandingMode mode : values()) {
+                if (mode.id == id) {
+                    return mode;
+                }
+            }
+            return HOLDING_PATTERN;
+        }
+
+        public static LandingMode byName(String name) {
+            for (LandingMode mode : values()) {
+                if (mode.serializedName.equals(name)) {
+                    return mode;
+                }
+            }
+            return HOLDING_PATTERN;
+        }
+    }
+
+    public record RouteEntry(String name, int defaultAltitude, LandingMode landingMode, Integer landingAltitude, List<Waypoint> waypoints) {
         public static RouteEntry empty(String name) {
-            return new RouteEntry(name, 96, List.of());
+            return new RouteEntry(name, 200, LandingMode.HOLDING_PATTERN, null, List.of());
         }
 
         public RouteEntry {
             if (name == null || name.isBlank()) {
                 name = defaultRouteName(1);
             }
+            if (landingMode == null) {
+                landingMode = LandingMode.HOLDING_PATTERN;
+            }
             waypoints = new ArrayList<>(waypoints.stream().limit(MAX_WAYPOINTS).toList());
+            if (landingMode.requiresFinalAltitude() && (waypoints.isEmpty() || landingAltitude == null)) {
+                landingMode = LandingMode.HOLDING_PATTERN;
+            }
+        }
+
+        public boolean hasLandingAltitude() {
+            return landingAltitude != null;
         }
 
         public void write(FriendlyByteBuf buffer) {
             buffer.writeUtf(name, 64);
             buffer.writeInt(defaultAltitude);
+            buffer.writeInt(landingMode.id());
+            buffer.writeBoolean(landingAltitude != null);
+            if (landingAltitude != null) {
+                buffer.writeInt(landingAltitude);
+            }
             buffer.writeInt(waypoints.size());
             for (Waypoint waypoint : waypoints) {
                 waypoint.write(buffer);
@@ -369,18 +500,24 @@ public class CruiseRoute {
         public static RouteEntry read(FriendlyByteBuf buffer) {
             String name = buffer.readUtf(64);
             int defaultAltitude = buffer.readInt();
+            LandingMode landingMode = LandingMode.byId(buffer.readInt());
+            Integer landingAltitude = buffer.readBoolean() ? buffer.readInt() : null;
             int size = Math.min(buffer.readInt(), MAX_WAYPOINTS);
             List<Waypoint> waypoints = new ArrayList<>(size);
             for (int i = 0; i < size; i++) {
                 waypoints.add(Waypoint.read(buffer));
             }
-            return new RouteEntry(name, defaultAltitude, waypoints);
+            return new RouteEntry(name, defaultAltitude, landingMode, landingAltitude, waypoints);
         }
 
         public CompoundTag toTag() {
             CompoundTag tag = new CompoundTag();
             tag.putString("Name", name);
             tag.putInt("DefaultAltitude", defaultAltitude);
+            tag.putString("LandingMode", landingMode.serializedName());
+            if (landingAltitude != null) {
+                tag.putInt("LandingAltitude", landingAltitude);
+            }
             ListTag list = new ListTag();
             for (Waypoint waypoint : waypoints) {
                 list.add(waypoint.toTag());
@@ -396,8 +533,19 @@ public class CruiseRoute {
                 waypoints.add(Waypoint.fromTag(list.getCompound(i)));
             }
             String name = tag.contains("Name", Tag.TAG_STRING) ? tag.getString("Name") : defaultRouteName(index);
-            int defaultAltitude = tag.contains("DefaultAltitude", Tag.TAG_INT) ? tag.getInt("DefaultAltitude") : 96;
-            return new RouteEntry(name, defaultAltitude, waypoints);
+            int defaultAltitude = tag.contains("DefaultAltitude", Tag.TAG_INT) ? tag.getInt("DefaultAltitude") : 200;
+            LandingMode landingMode = tag.contains("LandingMode", Tag.TAG_STRING)
+                    ? LandingMode.byName(tag.getString("LandingMode"))
+                    : LandingMode.HOLDING_PATTERN;
+            Integer landingAltitude = tag.contains("LandingAltitude", Tag.TAG_INT) ? tag.getInt("LandingAltitude") : null;
+            if (landingAltitude == null && landingMode.requiresFinalAltitude() && !waypoints.isEmpty()) {
+                Waypoint finalWaypoint = waypoints.get(waypoints.size() - 1);
+                if (finalWaypoint.hasAltitudeOverride()) {
+                    landingAltitude = finalWaypoint.altitude();
+                    waypoints.set(waypoints.size() - 1, new Waypoint(finalWaypoint.x(), finalWaypoint.z(), null, finalWaypoint.name()));
+                }
+            }
+            return new RouteEntry(name, defaultAltitude, landingMode, landingAltitude, waypoints);
         }
     }
 
