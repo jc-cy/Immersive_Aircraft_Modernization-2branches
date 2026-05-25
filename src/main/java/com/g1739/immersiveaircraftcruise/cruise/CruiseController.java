@@ -28,7 +28,7 @@ import java.util.WeakHashMap;
 public final class CruiseController {
     private static final double WAYPOINT_RADIUS = 16.0;
     private static final double FINAL_ACCELERATION_CUTOFF = 100.0;
-    private static final double VERTICAL_AIRCRAFT_LANDING_HORIZONTAL_RADIUS = 1.0;
+    private static final double VERTICAL_AIRCRAFT_LANDING_HORIZONTAL_RADIUS = 0.25;
     private static final double FAST_LANDING_HORIZONTAL_RADIUS = 1.0;
     private static final double FAST_LANDING_COMPLETION_HORIZONTAL_RADIUS = 2.0;
     private static final double FAST_LANDING_TURN_RADIUS = 0.25;
@@ -459,14 +459,15 @@ public final class CruiseController {
 
         float yawError = yawError(vehicle.getYRot(), dx, dz);
         float turn = horizontalDistance > FAST_LANDING_TURN_RADIUS ? fastLandingTurnInput(vehicle, yawError, horizontalDistance) : 0.0f;
-        boolean activelyReducingSpeed = finalBrake;
+        boolean hoverLanding = isVerticalAircraft(vehicle);
+        boolean activelyReducingSpeed = finalBrake && (!hoverLanding || horizontalDistance <= landingHorizontalRadius);
         FlareEstimate flareEstimate = flareEstimate(vehicle, finalBrake, plan.boostTarget(), horizontalDistance,
                 plan.stopTicks(), plan.rawDescent());
         boolean forceDescent = descentCommitted && shouldForceDescent(plan, flareEstimate);
         double controlAltitudeError = descentCommitted ? altitudeError : route.getTargetAltitude() - vehicle.getY();
         float climbInput = forceDescent ? 0.0f : altitudeInput(vehicle, controlAltitudeError);
         float boostTarget = activelyReducingSpeed ? 0.0f : plan.boostTarget();
-        if (activelyReducingSpeed) {
+        if (activelyReducingSpeed || hoverLanding) {
             stopBoostingImmediately(vehicle, access);
         } else {
             setBoosting(vehicle, access, true, boostTarget);
@@ -476,7 +477,7 @@ public final class CruiseController {
             setCruiseInputs(vehicle, turn, finalBrake ? -1.0f : 0.0f, pitchInput);
         } else {
             float verticalInput = forceDescent ? FAST_DESCENT_VERTICAL_INPUT : climbInput;
-            float forwardInput = horizontalDistance > landingHorizontalRadius ? (activelyReducingSpeed ? 0.0f : 1.0f) : 0.0f;
+            float forwardInput = horizontalDistance > landingHorizontalRadius ? (hoverLanding ? 0.4f : activelyReducingSpeed ? 0.0f : 1.0f) : 0.0f;
             setCruiseInputs(vehicle, turn, verticalInput, forwardInput);
             if (turn != 0.0f) {
                 vehicle.setYRot(vehicle.getYRot() - turn * 1.5f);
@@ -485,7 +486,7 @@ public final class CruiseController {
         if (!activelyReducingSpeed && vehicle instanceof EngineVehicle engineVehicle && engineVehicle.getEngineTarget() < 1.0f) {
             engineVehicle.setEngineTarget(1.0f);
         }
-        if (finalBrake) {
+        if (finalBrake && (!hoverLanding || horizontalDistance <= landingHorizontalRadius)) {
             brakeForLanding(vehicle, horizontalDistance);
         }
 
@@ -552,20 +553,20 @@ public final class CruiseController {
         return new Vec3(velocity.x * factor, velocity.y * yFactor, velocity.z * factor);
     }
 
-    private static boolean isLandingComplete(VehicleEntity vehicle, CruiseRoute.Waypoint waypoint, int targetAltitude,
+    private static boolean isLandingComplete(VehicleEntity vehicle, CruiseRoute.Waypoint waypoint, double targetAltitude,
                                              double horizontalRadius, double altitudeRadius, double stopSpeed) {
         return isLandingComplete(vehicle, waypoint.x() + 0.5, waypoint.z() + 0.5, targetAltitude,
                 horizontalRadius, altitudeRadius, stopSpeed);
     }
 
-    private static boolean isLandingComplete(VehicleEntity vehicle, double targetX, double targetZ, int targetAltitude,
+    private static boolean isLandingComplete(VehicleEntity vehicle, double targetX, double targetZ, double targetAltitude,
                                              double horizontalRadius, double altitudeRadius, double stopSpeed) {
         return horizontalDistance(vehicle, targetX, targetZ) <= horizontalRadius
                 && Math.abs(landingContactY(vehicle) - targetAltitude) <= altitudeRadius
                 && horizontalSpeed(vehicle) <= stopSpeed;
     }
 
-    private static boolean isFastLandingReadyForPostBrake(VehicleEntity vehicle, double targetX, double targetZ, int targetAltitude) {
+    private static boolean isFastLandingReadyForPostBrake(VehicleEntity vehicle, double targetX, double targetZ, double targetAltitude) {
         double horizontalRadius = landingHorizontalRadius(vehicle, FAST_LANDING_COMPLETION_HORIZONTAL_RADIUS);
         return horizontalDistance(vehicle, targetX, targetZ) <= horizontalRadius
                 && Math.abs(landingContactY(vehicle) - targetAltitude) <= FAST_LANDING_POST_BRAKE_ALTITUDE_RADIUS;
@@ -1106,7 +1107,7 @@ public final class CruiseController {
         return isVerticalAircraft(vehicle) ? VERTICAL_AIRCRAFT_LANDING_HORIZONTAL_RADIUS : fallbackRadius;
     }
 
-    private static double landingAltitudeError(VehicleEntity vehicle, int targetAltitude) {
+    private static double landingAltitudeError(VehicleEntity vehicle, double targetAltitude) {
         return targetAltitude - landingContactY(vehicle);
     }
 
@@ -1432,7 +1433,7 @@ public final class CruiseController {
         if (waypoint == null) {
             waypoint = route.getFinalTarget();
         }
-        int altitude = route.isHoldingPattern()
+        double altitude = route.isHoldingPattern()
                 || LANDING_ACTIVE.containsKey(vehicle)
                 ? route.getFinalAltitude()
                 : route.getTargetAltitude();
