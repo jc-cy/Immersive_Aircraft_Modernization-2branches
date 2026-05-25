@@ -11,6 +11,7 @@ import java.util.List;
 public class CruiseRoute {
     public static final int MAX_ROUTES = 16;
     public static final int MAX_WAYPOINTS = 32;
+    public static final int LANDING_ALTITUDE_INPUT_OFFSET = 2;
 
     private boolean enabled;
     private boolean holdingPattern;
@@ -245,7 +246,7 @@ public class CruiseRoute {
     public int getFinalAltitude() {
         RouteEntry entry = getSelectedEntry();
         if (getEffectiveLandingMode() != LandingMode.HOLDING_PATTERN && entry.hasLandingAltitude()) {
-            return entry.landingAltitude();
+            return entry.landingAltitude() + LANDING_ALTITUDE_INPUT_OFFSET;
         }
         return getFinalFlightAltitude();
     }
