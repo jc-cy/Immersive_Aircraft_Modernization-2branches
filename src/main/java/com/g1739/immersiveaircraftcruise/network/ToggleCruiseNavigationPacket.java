@@ -3,6 +3,7 @@ package com.g1739.immersiveaircraftcruise.network;
 import com.g1739.immersiveaircraftcruise.cruise.CruiseController;
 import com.g1739.immersiveaircraftcruise.cruise.CruiseModuleData;
 import com.g1739.immersiveaircraftcruise.cruise.CruiseRoute;
+import immersive_aircraft.entity.InventoryVehicleEntity;
 import immersive_aircraft.entity.VehicleEntity;
 import net.minecraft.network.FriendlyByteBuf;
 import net.minecraft.network.chat.Component;
@@ -98,6 +99,7 @@ public class ToggleCruiseNavigationPacket {
             } else {
                 boolean resumed = route.hasStartPoint();
                 route.resume(startPoint(vehicle));
+                syncVehicleInventory(player, vehicle);
                 player.displayClientMessage(Component.translatable(
                         resumed ? "message.immersive_aircraft_cruise.resumed" : "message.immersive_aircraft_cruise.enabled"), true);
             }
@@ -114,6 +116,13 @@ public class ToggleCruiseNavigationPacket {
 
     private static CruiseRoute.Waypoint startPoint(VehicleEntity vehicle) {
         return new CruiseRoute.Waypoint((int) Math.floor(vehicle.getX()), (int) Math.floor(vehicle.getZ()), null);
+    }
+
+    private static void syncVehicleInventory(ServerPlayer player, VehicleEntity vehicle) {
+        if (vehicle instanceof InventoryVehicleEntity inventoryVehicle) {
+            CruiseNetwork.CHANNEL.send(PacketDistributor.PLAYER.with(() -> player),
+                    SyncVehicleInventoryPacket.fromVehicle(inventoryVehicle));
+        }
     }
 
     private void mergeClientProgress(VehicleEntity vehicle, CruiseRoute route) {

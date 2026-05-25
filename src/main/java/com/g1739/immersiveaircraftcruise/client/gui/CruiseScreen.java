@@ -12,6 +12,7 @@ import net.minecraft.ChatFormatting;
 import net.minecraft.client.gui.GuiGraphics;
 import net.minecraft.client.gui.components.Button;
 import net.minecraft.client.gui.components.EditBox;
+import net.minecraft.client.gui.components.Tooltip;
 import net.minecraft.client.gui.screens.Screen;
 import net.minecraft.core.BlockPos;
 import net.minecraft.network.chat.Component;
@@ -89,6 +90,9 @@ public class CruiseScreen extends Screen {
 
     private void rebuildCruiseWidgets() {
         clearWidgets();
+        routeNameBox = null;
+        defaultAltitudeBox = null;
+        landingAltitudeBox = null;
 
         int panelWidth = Math.min(PANEL_WIDTH, width - 24);
         int left = (width - panelWidth) / 2;
@@ -149,8 +153,10 @@ public class CruiseScreen extends Screen {
         Button landingModeButton = Button.builder(landingModeLabel(), button -> {
             landingMode = nextLandingMode();
             button.setMessage(landingModeLabel());
+            button.setTooltip(landingModeTooltip());
             markDirty();
         }).bounds(left + 86, landingY, 118, 20).build();
+        landingModeButton.setTooltip(landingModeTooltip());
         addRenderableWidget(landingModeButton);
 
         landingAltitudeBox = new EditBox(font, left + 292, landingY, 56, 20, Component.translatable("screen.immersive_aircraft_cruise.landing_altitude"));
@@ -159,6 +165,7 @@ public class CruiseScreen extends Screen {
         landingAltitudeBox.setResponder(value -> {
             updateLandingAltitude();
             landingModeButton.setMessage(landingModeLabel());
+            landingModeButton.setTooltip(landingModeTooltip());
             markDirty();
         });
         addRenderableWidget(landingAltitudeBox);
@@ -374,6 +381,12 @@ public class CruiseScreen extends Screen {
     private Component landingModeLabel() {
         return Component.translatable("screen.immersive_aircraft_cruise.landing_mode.value",
                 Component.translatable("screen.immersive_aircraft_cruise.landing_mode." + effectiveLandingModeFromDrafts().serializedName()));
+    }
+
+    private Tooltip landingModeTooltip() {
+        return effectiveLandingModeFromDrafts() == CruiseRoute.LandingMode.FASTEST
+                ? Tooltip.create(Component.translatable("screen.immersive_aircraft_cruise.landing_mode.fastest.tooltip"))
+                : null;
     }
 
     private CruiseRoute.LandingMode nextLandingMode() {

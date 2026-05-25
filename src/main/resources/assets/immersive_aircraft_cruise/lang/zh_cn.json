@@ -28,6 +28,7 @@
   "screen.immersive_aircraft_cruise.landing_mode.value": "%s",
   "screen.immersive_aircraft_cruise.landing_mode.holding_pattern": "盘旋",
   "screen.immersive_aircraft_cruise.landing_mode.fastest": "最快降落",
+  "screen.immersive_aircraft_cruise.landing_mode.fastest.tooltip": "非自动导航时，请大致修正方向后开启导航降落。",
   "screen.immersive_aircraft_cruise.landing_mode.vertical": "垂直降落",
   "screen.immersive_aircraft_cruise.landing_mode.requires_y": "未填地面高度时只能盘旋",
   "message.immersive_aircraft_cruise.requires_module": "需要先安装巡航模块。",
