@@ -61,6 +61,7 @@ public final class CruiseClient {
     @Mod.EventBusSubscriber(modid = ImmersiveAircraftCruise.MOD_ID, value = Dist.CLIENT)
     public static final class ForgeEvents {
         private static boolean brakeWasDown;
+        private static boolean dismountWasDown;
 
         @SubscribeEvent
         public static void clientTick(TickEvent.ClientTickEvent event) {
@@ -74,13 +75,12 @@ public final class CruiseClient {
                 CruiseNetwork.CHANNEL.sendToServer(togglePacket());
             }
             boolean brakeDown = KeyBindings.down.isDown();
-            if (brakeDown && !brakeWasDown) {
-                StopCruiseNavigationPacket packet = stopPacket();
-                if (packet != null) {
-                    CruiseNetwork.CHANNEL.sendToServer(packet);
-                }
+            boolean dismountDown = KeyBindings.dismount.isDown();
+            if ((brakeDown && !brakeWasDown) || (dismountDown && !dismountWasDown)) {
+                sendStopPacket();
             }
             brakeWasDown = brakeDown;
+            dismountWasDown = dismountDown;
         }
 
         private static ToggleCruiseNavigationPacket togglePacket() {
@@ -93,6 +93,13 @@ public final class CruiseClient {
                 return new ToggleCruiseNavigationPacket(vehicle.getId(), access.iacruise$getRoute());
             }
             return new ToggleCruiseNavigationPacket();
+        }
+
+        private static void sendStopPacket() {
+            StopCruiseNavigationPacket packet = stopPacket();
+            if (packet != null) {
+                CruiseNetwork.CHANNEL.sendToServer(packet);
+            }
         }
 
         private static StopCruiseNavigationPacket stopPacket() {
