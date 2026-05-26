@@ -26,13 +26,13 @@ public final class CruiseClient {
     public static final KeyMapping OPEN_CRUISE = new KeyMapping(
             "key.immersive_aircraft_cruise.open_cruise",
             InputConstants.Type.KEYSYM,
-            GLFW.GLFW_KEY_L,
+            GLFW.GLFW_KEY_COMMA,
             "key.categories.immersive_aircraft_cruise"
     );
     public static final KeyMapping TOGGLE_CRUISE = new KeyMapping(
             "key.immersive_aircraft_cruise.toggle_cruise",
             InputConstants.Type.KEYSYM,
-            GLFW.GLFW_KEY_K,
+            GLFW.GLFW_KEY_PERIOD,
             "key.categories.immersive_aircraft_cruise"
     );
 

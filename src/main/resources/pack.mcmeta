@@ -1,6 +1,6 @@
 {
   "pack": {
-    "description": "Immersive Aircraft Cruise resources",
+    "description": "${mod_name} resources",
     "pack_format": 15
   }
 }

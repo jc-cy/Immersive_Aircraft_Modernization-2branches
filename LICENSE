@@ -1,0 +1,73 @@
+All Rights Reserved License / 保留所有权利许可声明
+
+Copyright (c) 2026 交错次元. All Rights Reserved.
+
+This project is not publicly open source and is not licensed as open source.
+
+中文
+
+1. 授权范围
+在未另行取得版权人明确书面许可的前提下，版权人仅授予你一项可撤销、非独占、不可转让、不可再许可、免费的有限许可：你可以下载、安装、备份并运行作者官方发布的、未被修改的本模组编译版本，但仅限个人、非商业、合法的 Minecraft 游戏使用。
+
+经版权人明确书面同意，且在你同意遵守本声明的前提下，版权人可自行决定是否向你提供本项目部分或全部源码用于查阅、学习、调试、私下沟通或其他被明确书面允许的用途。该等源码提供属于个别许可安排，不构成公开开源、普遍授权，也不当然包含复制、公开传播、再分发、修改后二次发布或商业使用权。
+
+2. 明确保留权利
+除上条明确授予的有限权利外，本项目及其相关内容的全部权利均由版权人保留，包括但不限于源码、字节码、资源文件、贴图、文本、界面、文档、配置示例、AI 生成或 AI 辅助生成内容及其他组成部分。获取文件、浏览源码、反编译可读内容、访问仓库页面或下载发布包，均不构成任何默示许可。若本项目被托管在公开代码平台，这也不表示版权人向你额外授予复制、分发、修改、再利用或二次发布权限；除平台运行所必需且法律上无法排除的最低限度技术权限外，仍以本声明为准。
+
+3. 未经书面许可严禁的行为
+你不得自行或允许任何第三方：
+- 复制、分发、转售、出租、出借、再许可、镜像、转载、转存、网盘分流、二次上传、预装、捆绑、内嵌或通过任何渠道再次发布本模组或其任何部分；
+- 将本模组收录进整合包、客户端、启动器、公共下载器、服务器预装包、镜像站、资源合集、会员资源、广告变现内容、赞助权益内容或其他打包分发场景；
+- 修改、翻译、适配、拆分、合并、魔改、移植、二次开发、制作衍生作品，或以源码、字节码、资源或文档为基础形成任何再发布内容；
+- 对本模组进行反编译、反汇编、逆向工程、资源提取、绕过技术限制或其他还原行为，但适用法律强制允许且不得被合同排除的最低限度情形除外；
+- 删除、隐藏、替换或篡改任何版权、署名、许可、免责声明、来源标识或其他权利声明；
+- 将本项目或其任何部分用于商业用途，包括但不限于收费下载、付费整合包、带货/广告变现发行、会员专享、付费服务器权益、商业服务配套、商业宣传素材或其他直接、间接获利行为；
+- 将本项目或其任何部分用于 AI 训练、微调、蒸馏、评测集、数据集、提示库、自动生成流程、代码补全语料或其他机器学习用途；
+- 冒用作者名义发布、暗示作者认可第三方版本、删除来源后再次传播，或以任何方式制造与作者存在合作、授权、背书关系的误导。
+
+4. 条件与终止
+任何违反本许可声明的行为，均会导致上述有限许可自动、即时终止。许可终止后，你必须立即停止使用，并删除你持有或控制的全部相关副本；法律要求保留的副本除外。
+
+5. 备份副本
+你仅可为个人存档目的保留合理数量的未修改备份副本，但该等副本不得向任何第三方提供、共享或公开传播。
+
+6. 第三方权利与第三方许可
+本项目中提及或可能兼容的任何游戏本体、模组加载器、API、第三方模组、平台、启动器、服务端软件、发行站点、名称、商标与相关内容，分别归其各自权利人所有。除非版权人另行明确书面声明，本项目为非官方作品，不代表也不构成对前述任何第三方的附属、合作、授权、代言或背书关系；相关名称仅用于说明兼容性、依赖关系或适用范围。
+若本项目中的任何文件、代码片段、贴图、音频、模型、文档或其他材料依法基于第三方开源或开放许可使用，则该等部分仍受其原始许可约束。本 ARR 声明仅适用于版权人有权以本声明授权或限制的部分，不得被解释为撤销、覆盖、改写或收紧第三方许可已经授予接收者的权利；你仍需同时遵守相应第三方许可条件。
+
+7. 可分割性与不弃权
+若本声明中的任何条款被认定为无效、违法或不可执行，不影响其余条款的效力。版权人未行使或延迟行使任何权利，不构成对该权利的放弃。
+
+English
+
+1. Scope of Permission
+Unless the copyright holder gives prior written permission, the copyright holder grants you only a limited, revocable, non-exclusive, non-transferable, non-sublicensable, royalty-free permission to download, install, back up, and run the author's official, unmodified compiled release of this mod solely for personal, non-commercial, lawful Minecraft gameplay.
+
+With the copyright holder's explicit prior written consent, and provided that you agree to comply with this notice, the copyright holder may, in the copyright holder's sole discretion, provide some or all of the source code to you for inspection, learning, debugging, private discussion, or other specifically approved written purposes. Any such source-code access is an individual permission arrangement only; it does not make the project publicly open source, does not create a general license, and does not by itself include any right to copy, publicly distribute, republish modified versions, or use the project commercially.
+
+2. Rights Reserved
+Except for the limited permission expressly granted above, all rights in and to this project and all related materials are reserved by the copyright holder, including but not limited to source code, bytecode, assets, textures, text, UI, documentation, configuration examples, AI-generated or AI-assisted content, and every other component. Possessing files, viewing source code, reading decompiled output, visiting a repository page, or downloading a release does not create any implied license. If this project is hosted on a public code platform, that public visibility does not grant any additional permission to copy, distribute, modify, reuse, or republish it; except for the minimum technical permissions that the platform must exercise and the law does not allow to be excluded, this notice still controls.
+
+3. Prohibited Acts Without Prior Written Permission
+You may not, and may not permit any third party to:
+- copy, distribute, sell, rent, lend, sublicense, mirror, repost, archive, re-upload, preinstall, bundle, embed, or otherwise republish this mod or any part of it through any channel;
+- include this mod in any modpack, client, launcher, public downloader, server bundle, mirror site, asset collection, membership resource, ad-monetized release, sponsored benefit, or any other packaged distribution scenario;
+- modify, translate, adapt, split, merge, port, extend, create derivative works from, or otherwise make altered or downstream releases based on the source code, bytecode, assets, or documentation;
+- decompile, disassemble, reverse engineer, extract assets from, bypass technical restrictions on, or otherwise reconstruct the mod, except to the minimum extent that applicable law expressly allows and does not permit to be waived by contract;
+- remove, hide, replace, or alter any copyright notice, attribution, license notice, disclaimer, provenance marker, or other rights notice;
+- use any part of this project for commercial purposes, including paid downloads, paid modpacks, ad-monetized releases, members-only distribution, paid server perks, commercial services, marketing materials, or any direct or indirect profit-making activity;
+- use any part of this project for AI training, fine-tuning, distillation, benchmarks, datasets, prompt libraries, automated generation pipelines, code-completion corpora, or any other machine-learning purpose;
+- publish under the author's name, imply the author's approval of a third-party build, strip provenance, or otherwise create a false impression of affiliation, authorization, partnership, or endorsement.
+
+4. Termination
+Any breach of this license notice automatically and immediately terminates the limited permission above. Upon termination, you must stop all use and delete every copy in your possession or control, except where retention is required by law.
+
+5. Backup Copies
+You may keep a reasonable number of unmodified backup copies solely for personal archival purposes, but you may not provide, share, or publicly distribute those copies to any third party.
+
+6. Third-Party Rights and Third-Party Licenses
+Any game, mod loader, API, third-party mod, platform, launcher, server software, distribution site, name, trademark, or related material mentioned in or potentially compatible with this project belongs to its respective rights holder. Unless the copyright holder expressly states otherwise in writing, this project is unofficial and does not create or imply any affiliation, partnership, authorization, sponsorship, endorsement, or representation. Such names are used only to identify compatibility, dependencies, or scope.
+If any file, code snippet, texture, audio, model, documentation, or other material in this project is lawfully used under a third-party open-source or open-content license, that material remains governed by its original license. This ARR notice applies only to the portions that the copyright holder is legally entitled to license or restrict under this notice, and it must not be interpreted to revoke, override, rewrite, or narrow rights already granted to recipients by an applicable third-party license. You remain responsible for complying with those third-party license terms as well.
+
+7. Severability and No Waiver
+If any provision of this notice is held invalid, unlawful, or unenforceable, the remaining provisions remain in effect. No failure or delay by the copyright holder in exercising any right waives that right.

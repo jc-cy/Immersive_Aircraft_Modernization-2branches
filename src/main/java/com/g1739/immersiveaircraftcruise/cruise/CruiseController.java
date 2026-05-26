@@ -306,7 +306,7 @@ public final class CruiseController {
         if (!(vehicle instanceof CruiseVehicleAccess access)) {
             return 1.0f;
         }
-        return 1.0f + boostLevel(vehicle, access) * 0.8f;
+        return 1.0f + boostLevel(vehicle, access) * 3.0f;
     }
 
     private static void tickHoldingPattern(VehicleEntity vehicle, CruiseRoute route) {

@@ -3,6 +3,7 @@ package com.g1739.immersiveaircraftcruise.item;
 import com.g1739.immersiveaircraftcruise.cruise.CruiseModuleData;
 import com.g1739.immersiveaircraftcruise.network.CruiseNetwork;
 import com.g1739.immersiveaircraftcruise.network.OpenCruiseScreenPacket;
+import net.minecraft.ChatFormatting;
 import net.minecraft.network.chat.Component;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.InteractionHand;
@@ -47,9 +48,13 @@ public class CruiseModuleItem extends Item {
 
     @Override
     public void appendHoverText(ItemStack stack, @Nullable Level level, List<Component> tooltip, TooltipFlag flag) {
+        tooltip.add(Component.translatable("tooltip.immersive_aircraft_cruise.category").withStyle(ChatFormatting.BLUE));
         tooltip.add(Component.translatable("tooltip.immersive_aircraft_cruise.cruise_module_quote"));
-        tooltip.add(Component.translatable("tooltip.immersive_aircraft_cruise.cruise_module"));
-        tooltip.add(Component.translatable("tooltip.immersive_aircraft_cruise.cruise_module_boost"));
+        tooltip.add(Component.translatable("tooltip.immersive_aircraft_cruise.cruise_module",
+                Component.keybind("key.immersive_aircraft_cruise.open_cruise"),
+                Component.keybind("key.immersive_aircraft_cruise.toggle_cruise")));
+        tooltip.add(Component.translatable("tooltip.immersive_aircraft_cruise.cruise_module_boost",
+                Component.translatable("tooltip.immersive_aircraft_cruise.overclock_mode").withStyle(ChatFormatting.GOLD)));
         super.appendHoverText(stack, level, tooltip, flag);
     }
 }

@@ -10,7 +10,7 @@ version = mod_version
 group = mod_group_id
 
 base {
-    archivesName = mod_id
+    archivesName = mod_name
 }
 
 java {
@@ -87,6 +87,9 @@ tasks.withType(JavaCompile).configureEach {
 }
 
 jar {
+    from(files('LICENSE', 'DISCLAIMER.md')) {
+        into 'META-INF'
+    }
     manifest {
         attributes([
                 'Specification-Title'     : mod_id,
@@ -96,7 +99,8 @@ jar {
                 'Implementation-Version'  : project.jar.archiveVersion,
                 'Implementation-Vendor'   : mod_authors,
                 'Implementation-Timestamp': new Date().format("yyyy-MM-dd'T'HH:mm:ssZ"),
-                'MixinConfigs'            : "${mod_id}.mixins.json"
+                'MixinConfigs'            : "${mod_id}.mixins.json",
+                'Bundle-License'          : 'All Rights Reserved'
         ])
     }
 }

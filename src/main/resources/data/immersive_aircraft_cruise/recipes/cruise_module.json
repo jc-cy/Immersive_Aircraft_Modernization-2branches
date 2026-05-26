@@ -1,22 +1,22 @@
 {
   "type": "minecraft:crafting_shaped",
   "pattern": [
-    "RCR",
-    "CGC",
-    "RLR"
+    " E ",
+    "PGP",
+    " N "
   ],
   "key": {
-    "C": {
-      "item": "minecraft:compass"
+    "E": {
+      "item": "immersive_aircraft:eco_engine"
     },
     "G": {
       "item": "immersive_aircraft:gyroscope"
     },
-    "L": {
-      "item": "minecraft:lever"
+    "N": {
+      "item": "immersive_aircraft:nether_engine"
     },
-    "R": {
-      "item": "minecraft:redstone"
+    "P": {
+      "item": "immersive_aircraft:sturdy_pipes"
     }
   },
   "result": {

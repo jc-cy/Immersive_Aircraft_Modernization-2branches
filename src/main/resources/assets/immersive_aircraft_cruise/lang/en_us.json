@@ -1,9 +1,9 @@
 {
-  "itemGroup.immersive_aircraft_cruise.main": "Immersive Aircraft Cruise",
-  "item.immersive_aircraft_cruise.cruise_module": "Overclocked Cruise Module",
-  "key.categories.immersive_aircraft_cruise": "Immersive Aircraft Cruise",
-  "key.immersive_aircraft_cruise.open_cruise": "Open Cruise Settings",
-  "key.immersive_aircraft_cruise.toggle_cruise": "Toggle Auto Navigation",
+  "itemGroup.immersive_aircraft_cruise.main": "Immersive Aircraft: Modernization",
+  "item.immersive_aircraft_cruise.cruise_module": "Overclocked Cruise Guidance Module",
+  "key.categories.immersive_aircraft_cruise": "Immersive Aircraft: Modernization",
+  "key.immersive_aircraft_cruise.open_cruise": "Open Route Settings",
+  "key.immersive_aircraft_cruise.toggle_cruise": "Start Auto Navigation",
   "screen.immersive_aircraft_cruise.title": "Cruise Route",
   "screen.immersive_aircraft_cruise.enabled": "Auto Navigation",
   "screen.immersive_aircraft_cruise.route_name": "Route name",
@@ -31,7 +31,7 @@
   "screen.immersive_aircraft_cruise.landing_mode.fastest.tooltip": "When not already under auto navigation, roughly align your heading before starting navigation landing.",
   "screen.immersive_aircraft_cruise.landing_mode.vertical": "Vertical landing",
   "screen.immersive_aircraft_cruise.landing_mode.requires_y": "Ground Y required",
-  "message.immersive_aircraft_cruise.requires_module": "Install a cruise module first.",
+  "message.immersive_aircraft_cruise.requires_module": "Install an overclocked cruise guidance module first.",
   "message.immersive_aircraft_cruise.saved": "Cruise route saved.",
   "message.immersive_aircraft_cruise.saved_and_refreshed": "Cruise route saved and refreshed.",
   "message.immersive_aircraft_cruise.enabled": "Auto navigation enabled.",
@@ -42,7 +42,9 @@
   "message.immersive_aircraft_cruise.hud_disabled": "Info display disabled.",
   "message.immersive_aircraft_cruise.no_route": "Set at least one cruise waypoint first.",
   "message.immersive_aircraft_cruise.disabled_brake": "Auto navigation exited.",
-  "tooltip.immersive_aircraft_cruise.cruise_module_quote": "Natural selection, forward four!!!",
-  "tooltip.immersive_aircraft_cruise.cruise_module": "Save routes and enable auto navigation. Check the assigned keybind.",
-  "tooltip.immersive_aircraft_cruise.cruise_module_boost": "Enters overclock mode during heading and altitude correction: +100% power, +80% fuel consumption."
+  "tooltip.immersive_aircraft_cruise.category": "Overclock Module",
+  "tooltip.immersive_aircraft_cruise.cruise_module_quote": "Top-tier technology beyond all limits.",
+  "tooltip.immersive_aircraft_cruise.cruise_module": "In an aircraft, press [%s] or right-click while held to open routes; press [%s] to enter auto navigation mode.",
+  "tooltip.immersive_aircraft_cruise.cruise_module_boost": "Successful route correction sharply increases fuel consumption and enters %s!",
+  "tooltip.immersive_aircraft_cruise.overclock_mode": "Overclock Mode"
 }
