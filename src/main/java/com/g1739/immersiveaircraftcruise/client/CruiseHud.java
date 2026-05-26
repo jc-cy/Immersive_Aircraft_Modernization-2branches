@@ -73,7 +73,7 @@ public final class CruiseHud {
             graphics.renderItem(fuelIcon, x, y + 20);
         }
         graphics.drawString(font, "速度 " + format(speed) + " 格/秒", textX, y + 2, 0xFFFFFF, true);
-        graphics.drawString(font, "燃料剩余 " + fuelInfo.amount(), textX, y + 22, 0xFFFFFF, true);
+        graphics.drawString(font, "燃料剩余 " + fuelInfo.amountText(), textX, y + 22, 0xFFFFFF, true);
         graphics.drawString(font, "剩余时间 " + formatTime(fuelInfo.remainingTicks()), x, y + 42, 0xFFFFFF, true);
         graphics.drawString(font, "起点 " + formatPoint(route.getStartPoint()), x, y + 54, 0xD8D8D8, true);
         graphics.drawString(font, "上站 " + formatPoint(previousPoint(route)), x, y + 64, 0xD8D8D8, true);

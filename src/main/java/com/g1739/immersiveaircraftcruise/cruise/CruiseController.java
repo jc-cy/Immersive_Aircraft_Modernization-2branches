@@ -19,11 +19,16 @@ import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.phys.Vec3;
+import net.minecraftforge.common.capabilities.ForgeCapabilities;
+import net.minecraftforge.fluids.FluidStack;
+import net.minecraftforge.fluids.capability.IFluidHandlerItem;
 import net.minecraftforge.network.PacketDistributor;
 import org.joml.Matrix3f;
 import org.joml.Vector3f;
 
+import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.WeakHashMap;
 
 public final class CruiseController {
@@ -1775,36 +1780,123 @@ public final class CruiseController {
         if (!(vehicle.getControllingPassenger() instanceof ServerPlayer player)) {
             return;
         }
-        int storedFuel = 0;
-        ItemStack icon = ItemStack.EMPTY;
-        int pendingFuel = 0;
-        int pendingFuelItems = 0;
-        if (engineVehicle instanceof EngineVehicleAccessor accessor) {
-            for (int fuel : accessor.immersive_aircraft_cruise$getFuel()) {
-                storedFuel += Math.max(0, fuel);
-            }
-        }
-        if (engineVehicle instanceof CruiseFuelIconAccess fuelIconAccess) {
+        List<SlotDescription> slots = engineVehicle.getInventoryDescription().getSlots(VehicleInventoryDescription.BOILER);
+        int[] fuel = engineVehicle instanceof EngineVehicleAccessor accessor
+                ? accessor.immersive_aircraft_cruise$getFuel()
+                : new int[0];
+        int slotIndex = displayedFuelSlot(engineVehicle, slots, fuel);
+        int storedFuel = slotIndex >= 0 && slotIndex < fuel.length ? Math.max(0, fuel[slotIndex]) : 0;
+        FuelSlotDisplay display = fuelDisplayForSlot(engineVehicle, slots, slotIndex);
+        ItemStack icon = display.icon();
+        if (icon.isEmpty() && engineVehicle instanceof CruiseFuelIconAccess fuelIconAccess) {
             icon = fuelIconAccess.iacruise$getBurningFuelIcon();
         }
-        for (SlotDescription slot : engineVehicle.getInventoryDescription().getSlots(VehicleInventoryDescription.BOILER)) {
-            ItemStack stack = engineVehicle.getInventory().getItem(slot.index());
-            int fuelTime = immersive_aircraft.util.Utils.getFuelTime(stack);
-            if (fuelTime > 0) {
-                pendingFuel += fuelTime * stack.getCount();
-                pendingFuelItems += stack.getCount();
-            }
-            if (icon.isEmpty() && fuelTime > 0) {
-                icon = stack.copyWithCount(1);
-            }
-        }
-        if (storedFuel <= 0 && pendingFuel <= 0) {
+        if (storedFuel <= 0 && display.pendingFuel() <= 0) {
             icon = ItemStack.EMPTY;
         }
         float consumption = Math.max(0.0f, engineVehicle.getFuelConsumption());
-        int remainingTicks = consumption <= 0.0f ? -1 : Math.round((storedFuel + pendingFuel) / consumption);
+        int remainingTicks = consumption <= 0.0f ? -1 : clampTicks((storedFuel + display.pendingFuel()) / (double) consumption);
         CruiseNetwork.CHANNEL.send(PacketDistributor.PLAYER.with(() -> player),
-                new UpdateCruiseFuelPacket(vehicle.getId(), new CruiseFuelInfo(pendingFuelItems, remainingTicks, icon)));
+                new UpdateCruiseFuelPacket(vehicle.getId(), new CruiseFuelInfo(display.amountText(), remainingTicks, icon)));
+    }
+
+    private static int displayedFuelSlot(EngineVehicle engineVehicle, List<SlotDescription> slots, int[] fuel) {
+        int size = Math.min(slots.size(), fuel.length);
+        for (int i = 0; i < size; i++) {
+            if (fuel[i] > 0) {
+                return i;
+            }
+        }
+        for (int i = 0; i < slots.size(); i++) {
+            ItemStack stack = engineVehicle.getInventory().getItem(slots.get(i).index());
+            if (immersive_aircraft.util.Utils.getFuelTime(stack) > 0) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    private static FuelSlotDisplay fuelDisplayForSlot(EngineVehicle engineVehicle, List<SlotDescription> slots, int slotIndex) {
+        if (slotIndex < 0 || slotIndex >= slots.size()) {
+            return FuelSlotDisplay.empty();
+        }
+        ItemStack stack = engineVehicle.getInventory().getItem(slots.get(slotIndex).index());
+        if (stack.isEmpty()) {
+            return FuelSlotDisplay.empty();
+        }
+        int fuelTime = immersive_aircraft.util.Utils.getFuelTime(stack);
+        FluidStack fluid = containedFluid(stack);
+        if (!fluid.isEmpty()) {
+            long pendingFuel = fluidPendingFuel(stack, fluid, fuelTime);
+            return new FuelSlotDisplay(formatFluidAmount(fluid), pendingFuel, stack.copyWithCount(1));
+        }
+        if (fuelTime <= 0) {
+            return FuelSlotDisplay.empty();
+        }
+        return new FuelSlotDisplay(Integer.toString(stack.getCount()), (long) fuelTime * stack.getCount(), stack.copyWithCount(1));
+    }
+
+    private static long fluidPendingFuel(ItemStack stack, FluidStack fluid, int fuelTime) {
+        if (fuelTime <= 0) {
+            return 0L;
+        }
+        int consumedPerUse = fluidConsumedByCraftingUse(stack, fluid);
+        if (consumedPerUse <= 0) {
+            return (long) fuelTime * stack.getCount();
+        }
+        return (long) fuelTime * (fluid.getAmount() / consumedPerUse);
+    }
+
+    private static int fluidConsumedByCraftingUse(ItemStack stack, FluidStack fluid) {
+        ItemStack single = stack.copyWithCount(1);
+        if (!single.getItem().hasCraftingRemainingItem(single)) {
+            return 0;
+        }
+        ItemStack remaining = single.getItem().getCraftingRemainingItem(single);
+        FluidStack remainingFluid = containedFluid(remaining);
+        if (remainingFluid.isEmpty()) {
+            return fluid.getAmount();
+        }
+        if (remainingFluid.getFluid() != fluid.getFluid() || !Objects.equals(remainingFluid.getTag(), fluid.getTag())) {
+            return 0;
+        }
+        return Math.max(0, fluid.getAmount() - remainingFluid.getAmount());
+    }
+
+    private static FluidStack containedFluid(ItemStack stack) {
+        if (stack.isEmpty()) {
+            return FluidStack.EMPTY;
+        }
+        return stack.getCapability(ForgeCapabilities.FLUID_HANDLER_ITEM)
+                .map(CruiseController::firstFluid)
+                .orElse(FluidStack.EMPTY);
+    }
+
+    private static FluidStack firstFluid(IFluidHandlerItem handler) {
+        for (int i = 0; i < handler.getTanks(); i++) {
+            FluidStack fluid = handler.getFluidInTank(i);
+            if (!fluid.isEmpty()) {
+                return fluid.copy();
+            }
+        }
+        return FluidStack.EMPTY;
+    }
+
+    private static String formatFluidAmount(FluidStack fluid) {
+        return fluid.getAmount() + " mB";
+    }
+
+    private static int clampTicks(double ticks) {
+        if (ticks >= Integer.MAX_VALUE) {
+            return Integer.MAX_VALUE;
+        }
+        return Math.max(0, (int) Math.round(ticks));
+    }
+
+    private record FuelSlotDisplay(String amountText, long pendingFuel, ItemStack icon) {
+        private static FuelSlotDisplay empty() {
+            return new FuelSlotDisplay("0", 0L, ItemStack.EMPTY);
+        }
     }
 
     public static Vec3 targetPosition(VehicleEntity vehicle) {
