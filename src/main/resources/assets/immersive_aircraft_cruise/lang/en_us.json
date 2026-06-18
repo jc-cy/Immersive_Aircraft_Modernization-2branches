@@ -7,6 +7,7 @@
   "screen.immersive_aircraft_cruise.title": "Cruise Route",
   "screen.immersive_aircraft_cruise.enabled": "Auto Navigation",
   "screen.immersive_aircraft_cruise.route_status": "Current: %s  Next: %s",
+  "screen.immersive_aircraft_cruise.next_stop_status": "Next: %s",
   "screen.immersive_aircraft_cruise.route_name": "Route name",
   "screen.immersive_aircraft_cruise.new_route": "New",
   "screen.immersive_aircraft_cruise.delete_route": "Delete",

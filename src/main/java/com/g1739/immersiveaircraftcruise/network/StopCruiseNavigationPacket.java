@@ -72,7 +72,7 @@ public class StopCruiseNavigationPacket {
                 return;
             }
             Entity root = player.getRootVehicle();
-            if (!(root instanceof VehicleEntity vehicle) || !vehicle.hasPassenger(player)) {
+            if (!(root instanceof VehicleEntity vehicle) || !CruiseController.isPilot(vehicle, player)) {
                 return;
             }
             if (!CruiseController.hasCruiseModule(vehicle)) {

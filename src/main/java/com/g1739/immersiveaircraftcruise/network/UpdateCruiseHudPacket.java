@@ -44,7 +44,7 @@ public record UpdateCruiseHudPacket(int entityId, RouteStorageTarget target, boo
             }
 
             Entity entity = player.level().getEntity(packet.entityId);
-            if (entity instanceof VehicleEntity vehicle && vehicle.hasPassenger(player)) {
+            if (entity instanceof VehicleEntity vehicle && CruiseController.isPilot(vehicle, player)) {
                 if (!CruiseController.hasCruiseModule(vehicle)) {
                     return;
                 }

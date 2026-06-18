@@ -69,7 +69,7 @@ public final class CruiseClient {
                 return;
             }
             while (OPEN_CRUISE.consumeClick()) {
-                CruiseNetwork.CHANNEL.sendToServer(new RequestOpenCruiseScreenPacket());
+                CruiseNetwork.CHANNEL.sendToServer(openScreenPacket());
             }
             while (TOGGLE_CRUISE.consumeClick()) {
                 CruiseNetwork.CHANNEL.sendToServer(togglePacket());
@@ -93,6 +93,18 @@ public final class CruiseClient {
                 return new ToggleCruiseNavigationPacket(vehicle.getId(), access.iacruise$getRoute());
             }
             return new ToggleCruiseNavigationPacket();
+        }
+
+        private static RequestOpenCruiseScreenPacket openScreenPacket() {
+            Minecraft minecraft = Minecraft.getInstance();
+            if (minecraft.player == null) {
+                return new RequestOpenCruiseScreenPacket();
+            }
+            Entity root = minecraft.player.getRootVehicle();
+            if (root instanceof VehicleEntity vehicle && vehicle instanceof CruiseVehicleAccess access) {
+                return new RequestOpenCruiseScreenPacket(vehicle.getId(), access.iacruise$getRoute());
+            }
+            return new RequestOpenCruiseScreenPacket();
         }
 
         private static void sendStopPacket() {

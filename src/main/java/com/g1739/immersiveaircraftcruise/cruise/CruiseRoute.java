@@ -147,6 +147,18 @@ public class CruiseRoute {
         return routes.get(selectedRoute);
     }
 
+    public String getSelectedRouteDisplayName() {
+        return routeNameForDisplay(getSelectedEntry().name(), selectedRoute + 1);
+    }
+
+    public static String routeNameForDisplay(String name, int index) {
+        String normalized = name == null ? "" : name.strip();
+        if (normalized.isBlank() || normalized.equals(defaultRouteName(index))) {
+            return "";
+        }
+        return normalized;
+    }
+
     public boolean hasAnyWaypoint() {
         for (RouteEntry route : routes) {
             if (!route.waypoints().isEmpty()) {
@@ -344,6 +356,42 @@ public class CruiseRoute {
         startPoint = source.startPoint;
         initialAltitudeReached = source.initialAltitudeReached;
         clampCurrentIndex();
+    }
+
+    public boolean mergeProgressForwardFrom(CruiseRoute source) {
+        if (source == null || source.selectedRoute != selectedRoute) {
+            return false;
+        }
+        return mergeProgressForward(source.currentIndex, source.holdingPattern, source.initialAltitudeReached, source.startPoint);
+    }
+
+    public boolean mergeProgressForward(int sourceCurrentIndex, boolean sourceHoldingPattern,
+                                        boolean sourceInitialAltitudeReached, Waypoint sourceStartPoint) {
+        boolean changed = false;
+        int waypointCount = getSelectedEntry().waypoints().size();
+        if (waypointCount > 0 && sourceCurrentIndex >= 0 && sourceCurrentIndex < waypointCount) {
+            if (sourceCurrentIndex > currentIndex) {
+                currentIndex = sourceCurrentIndex;
+                holdingPattern = false;
+                changed = true;
+            }
+            if (sourceHoldingPattern && sourceCurrentIndex == waypointCount - 1
+                    && (!holdingPattern || currentIndex != sourceCurrentIndex)) {
+                currentIndex = sourceCurrentIndex;
+                holdingPattern = true;
+                changed = true;
+            }
+        }
+        if (sourceInitialAltitudeReached && !initialAltitudeReached) {
+            initialAltitudeReached = true;
+            changed = true;
+        }
+        if (startPoint == null && sourceStartPoint != null) {
+            startPoint = sourceStartPoint;
+            changed = true;
+        }
+        clampCurrentIndex();
+        return changed;
     }
 
     private void clampSelectedRoute() {

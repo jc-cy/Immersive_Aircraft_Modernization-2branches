@@ -7,6 +7,7 @@
   "screen.immersive_aircraft_cruise.title": "巡航路线",
   "screen.immersive_aircraft_cruise.enabled": "自动导航",
   "screen.immersive_aircraft_cruise.route_status": "当前航线：%s  下一站：%s",
+  "screen.immersive_aircraft_cruise.next_stop_status": "下一站：%s",
   "screen.immersive_aircraft_cruise.route_name": "航线名",
   "screen.immersive_aircraft_cruise.new_route": "新建",
   "screen.immersive_aircraft_cruise.delete_route": "删除航线",

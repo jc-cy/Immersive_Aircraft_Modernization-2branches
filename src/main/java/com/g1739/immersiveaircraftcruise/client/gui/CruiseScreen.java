@@ -79,6 +79,11 @@ public class CruiseScreen extends Screen {
         loadSelectedRoute();
     }
 
+    @Override
+    public boolean isPauseScreen() {
+        return false;
+    }
+
     public boolean isForEntity(int entityId) {
         return this.entityId == entityId;
     }
@@ -345,7 +350,12 @@ public class CruiseScreen extends Screen {
                 clearWaypoints();
             }
         }, Component.translatable("screen.immersive_aircraft_cruise.clear_confirm.title"),
-                Component.translatable("screen.immersive_aircraft_cruise.clear_confirm.message")));
+                Component.translatable("screen.immersive_aircraft_cruise.clear_confirm.message")) {
+            @Override
+            public boolean isPauseScreen() {
+                return false;
+            }
+        });
     }
 
     private void clearWaypoints() {
@@ -713,9 +723,11 @@ public class CruiseScreen extends Screen {
     private void drawRouteStatus(GuiGraphics graphics, CruiseRoute previewRoute, int left, int panelWidth) {
         CruiseRoute liveRoute = liveVehicleRoute();
         CruiseRoute statusRoute = liveRoute == null ? previewRoute : liveRoute;
-        String routeName = statusRoute.getSelectedEntry().name();
         String nextStop = statusPointLabel(statusNextPoint(statusRoute));
-        String text = Component.translatable("screen.immersive_aircraft_cruise.route_status", routeName, nextStop).getString();
+        String routeName = statusRoute.getSelectedRouteDisplayName();
+        String text = routeName.isBlank()
+                ? Component.translatable("screen.immersive_aircraft_cruise.next_stop_status", nextStop).getString()
+                : Component.translatable("screen.immersive_aircraft_cruise.route_status", routeName, nextStop).getString();
         int x = left + 126;
         int maxWidth = Math.max(0, panelWidth - 126);
         graphics.drawString(font, fitText(text, maxWidth), x, 10, 0xD0D0D0, false);

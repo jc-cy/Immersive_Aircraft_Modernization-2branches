@@ -98,6 +98,7 @@ public final class CruiseController {
     private static final Map<EngineVehicle, Float> BOOST_LEVEL = new WeakHashMap<>();
     private static final Map<VehicleEntity, Vec3> CONTROLLER_VELOCITY_BEFORE = new WeakHashMap<>();
     private static final Map<VehicleEntity, ItemStack> ACTIVE_MODULE = new WeakHashMap<>();
+    private static final Map<VehicleEntity, String> ACTIVE_MODULE_ID = new WeakHashMap<>();
     private static final Map<VehicleEntity, Boolean> LANDING_ACTIVE = new WeakHashMap<>();
     private static final Map<VehicleEntity, Boolean> FAST_LANDING_FINAL_BRAKE_ACTIVE = new WeakHashMap<>();
     private static final Map<VehicleEntity, Boolean> AUTO_BRAKE_INPUT = new WeakHashMap<>();
@@ -108,6 +109,10 @@ public final class CruiseController {
 
     public static boolean hasCruiseModule(Entity entity) {
         return entity instanceof VehicleEntity vehicle && CruiseModuleData.hasModule(vehicle);
+    }
+
+    public static boolean isPilot(VehicleEntity vehicle, ServerPlayer player) {
+        return player != null && vehicle.getControllingPassenger() == player;
     }
 
     public static void serverEngineTick(EngineVehicle engineVehicle) {
@@ -130,11 +135,12 @@ public final class CruiseController {
 
         if (!CruiseModuleData.hasModule(vehicle)) {
             ACTIVE_MODULE.remove(vehicle);
-            access.iacruise$setRoute(CruiseRoute.empty());
+            access.iacruise$getRoute().stopNavigation();
             access.iacruise$setBoosting(false);
             if (vehicle instanceof EngineVehicle engineVehicle) {
                 BOOST_LEVEL.remove(engineVehicle);
             }
+            setCruiseInputs(vehicle, 0.0f, 0.0f, 0.0f);
             TURN_MEMORY.remove(vehicle);
             ALTITUDE_MEMORY.remove(vehicle);
             LANDING_ACTIVE.remove(vehicle);
@@ -271,24 +277,52 @@ public final class CruiseController {
         return serverRoute(vehicle, access);
     }
 
+    public static CruiseRoute routeForOpeningScreen(VehicleEntity vehicle, int clientSelectedRoute, int clientCurrentIndex,
+                                                    boolean clientHoldingPattern, boolean clientInitialAltitudeReached,
+                                                    CruiseRoute.Waypoint clientStartPoint) {
+        if (!(vehicle instanceof CruiseVehicleAccess access)) {
+            return CruiseModuleData.read(vehicle);
+        }
+        return CruiseModuleData.findModule(vehicle)
+                .map(stack -> {
+                    String moduleId = CruiseModuleData.moduleId(vehicle, stack);
+                    boolean sameModule = moduleId.equals(ACTIVE_MODULE_ID.get(vehicle));
+                    CruiseRoute loaded = CruiseModuleData.read(stack);
+                    if (sameModule && clientSelectedRoute == loaded.getSelectedRoute()
+                            && loaded.mergeProgressForward(clientCurrentIndex, clientHoldingPattern,
+                            clientInitialAltitudeReached, clientStartPoint)) {
+                        CruiseModuleData.write(stack, loaded);
+                    }
+                    access.iacruise$setRoute(loaded.copy());
+                    ACTIVE_MODULE.put(vehicle, stack);
+                    ACTIVE_MODULE_ID.put(vehicle, moduleId);
+                    return loaded;
+                })
+                .orElseGet(CruiseRoute::empty);
+    }
+
     private static CruiseRoute serverRoute(VehicleEntity vehicle, CruiseVehicleAccess access) {
         return CruiseModuleData.findModule(vehicle)
                 .map(stack -> {
-                    CruiseRoute cached = access.iacruise$getRoute();
-                    if (!cached.hasAnyWaypoint()) {
-                        CruiseRoute loaded = CruiseModuleData.read(stack);
-                        access.iacruise$setRoute(loaded);
-                        ACTIVE_MODULE.put(vehicle, stack);
-                        return loaded;
+                    String moduleId = CruiseModuleData.moduleId(vehicle, stack);
+                    boolean sameModule = moduleId.equals(ACTIVE_MODULE_ID.get(vehicle));
+                    CruiseRoute loaded = CruiseModuleData.read(stack);
+                    if (sameModule) {
+                        CruiseRoute cached = access.iacruise$getRoute();
+                        if (loaded.mergeProgressForwardFrom(cached)) {
+                            CruiseModuleData.write(stack, loaded);
+                        }
                     }
+                    access.iacruise$setRoute(loaded);
                     ACTIVE_MODULE.put(vehicle, stack);
-                    return cached;
+                    ACTIVE_MODULE_ID.put(vehicle, moduleId);
+                    return loaded;
                 })
                 .orElseGet(() -> {
                     ACTIVE_MODULE.remove(vehicle);
-                    CruiseRoute empty = CruiseRoute.empty();
-                    access.iacruise$setRoute(empty);
-                    return empty;
+                    CruiseRoute cached = access.iacruise$getRoute();
+                    cached.stopNavigation();
+                    return cached;
                 });
     }
 

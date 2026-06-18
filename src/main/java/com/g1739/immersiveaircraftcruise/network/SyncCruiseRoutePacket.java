@@ -52,7 +52,7 @@ public record SyncCruiseRoutePacket(int entityId, RouteStorageTarget target, Cru
             }
 
             Entity entity = player.level().getEntity(packet.entityId);
-            if (entity instanceof VehicleEntity vehicle && vehicle.hasPassenger(player)) {
+            if (entity instanceof VehicleEntity vehicle && CruiseController.isPilot(vehicle, player)) {
                 if (!CruiseController.hasCruiseModule(vehicle)) {
                     player.displayClientMessage(Component.translatable("message.immersive_aircraft_cruise.requires_module"), true);
                     return;
