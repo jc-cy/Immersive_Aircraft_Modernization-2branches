@@ -75,10 +75,11 @@ public final class CruiseHud {
         graphics.drawString(font, "速度 " + format(speed) + " 格/秒", textX, y + 2, 0xFFFFFF, true);
         graphics.drawString(font, "燃料剩余 " + fuelInfo.amountText(), textX, y + 22, 0xFFFFFF, true);
         graphics.drawString(font, "剩余时间 " + formatTime(fuelInfo.remainingTicks()), x, y + 42, 0xFFFFFF, true);
-        graphics.drawString(font, "起点 " + formatPoint(route.getStartPoint()), x, y + 54, 0xD8D8D8, true);
-        graphics.drawString(font, "上站 " + formatPoint(previousPoint(route)), x, y + 64, 0xD8D8D8, true);
-        graphics.drawString(font, "下站 " + formatPoint(nextPoint(route)), x, y + 74, 0xD8D8D8, true);
-        graphics.drawString(font, "终点 " + formatPoint(route.getFinalTarget()), x, y + 84, 0xD8D8D8, true);
+        graphics.drawString(font, fitText(font, route.getSelectedEntry().name(), CruiseHudSettings.WIDTH), x, y + 54, 0xFFE28A, true);
+        graphics.drawString(font, "起点 " + formatPoint(route.getStartPoint()), x, y + 64, 0xD8D8D8, true);
+        graphics.drawString(font, "上站 " + formatPoint(previousPoint(route)), x, y + 74, 0xD8D8D8, true);
+        graphics.drawString(font, "下站 " + formatPoint(nextPoint(route)), x, y + 84, 0xD8D8D8, true);
+        graphics.drawString(font, "终点 " + formatPoint(route.getFinalTarget()), x, y + 94, 0xD8D8D8, true);
     }
 
     public static int x(int screenWidth) {
@@ -145,6 +146,18 @@ public final class CruiseHud {
         String label = waypoint.displayLabel();
         String coordinates = waypoint.x() + "," + waypoint.z();
         return waypoint.hasName() ? label + " (" + coordinates + ")" : coordinates;
+    }
+
+    private static String fitText(Font font, String text, int maxWidth) {
+        if (maxWidth <= 0 || font.width(text) <= maxWidth) {
+            return text;
+        }
+        String suffix = "...";
+        int end = text.length();
+        while (end > 0 && font.width(text.substring(0, end) + suffix) > maxWidth) {
+            end--;
+        }
+        return end <= 0 ? suffix : text.substring(0, end) + suffix;
     }
 
     private static String formatTime(int ticks) {

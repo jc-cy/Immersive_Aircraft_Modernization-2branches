@@ -299,14 +299,14 @@ public final class CruiseController {
         if (usesControlledBoost(vehicle)) {
             return 1.0f;
         }
-        return 1.0f + boostLevel(vehicle, access);
+        return powerMultiplier(access, boostLevel(vehicle, access));
     }
 
     public static float getFuelMultiplier(EngineVehicle vehicle) {
         if (!(vehicle instanceof CruiseVehicleAccess access)) {
             return 1.0f;
         }
-        return 1.0f + boostLevel(vehicle, access) * 3.0f;
+        return fuelMultiplier(access, boostLevel(vehicle, access));
     }
 
     private static void tickHoldingPattern(VehicleEntity vehicle, CruiseRoute route) {
@@ -762,7 +762,7 @@ public final class CruiseController {
             velocity = velocity.scale(horizontalDecay);
             double thrust = Math.pow(enginePower, 5.0d) * engineSpeed;
             Vec3 thrustVelocity = forward.scale(thrust);
-            velocity = velocity.add(thrustVelocity.scale(1.0d + boostLevel));
+            velocity = velocity.add(thrustVelocity.scale(controlledThrustMultiplier(vehicle, boostLevel)));
             double stepDistance = horizontalLength(velocity);
             distance += stepDistance * stepRatio;
             boostLevel = nextPredictedBoostLevel(boostLevel, targetBoostLevel);
@@ -846,9 +846,11 @@ public final class CruiseController {
         double availableDescentDistance = Math.max(0.0d, horizontalDistance - horizontalRadius);
         float boostTarget = 1.0f;
         DescentEstimate descentEstimate = descentEstimate(vehicle, activeDescent, boostTarget);
-        for (int iteration = 0; iteration < 3; iteration++) {
-            boostTarget = fastLandingBoostTarget(availableDescentDistance, currentSpeed, activeDescent, descentEstimate.ticks());
-            descentEstimate = descentEstimate(vehicle, activeDescent, boostTarget);
+        if (cruiseMode(vehicle).powerBonus() > 0.0f) {
+            for (int iteration = 0; iteration < 3; iteration++) {
+                boostTarget = fastLandingBoostTarget(availableDescentDistance, currentSpeed, activeDescent, descentEstimate.ticks());
+                descentEstimate = descentEstimate(vehicle, activeDescent, boostTarget);
+            }
         }
         double descentRate = descentEstimate.rate();
         double descentTime = descentEstimate.ticks();
@@ -1257,7 +1259,10 @@ public final class CruiseController {
         if (usesControlledBoost(engineVehicle)) {
             return enginePower;
         }
-        return enginePower * (1.0d + Mth.clamp((float) boostLevel, 0.0f, 1.0f));
+        if (engineVehicle instanceof CruiseVehicleAccess access) {
+            return enginePower * powerMultiplier(access, Mth.clamp((float) boostLevel, 0.0f, 1.0f));
+        }
+        return enginePower;
     }
 
     private static double predictedCurrentBoostLevel(EngineVehicle engineVehicle) {
@@ -1274,6 +1279,36 @@ public final class CruiseController {
             return Math.min(clampedTarget, current + step);
         }
         return Math.max(clampedTarget, current - step);
+    }
+
+    private static float powerMultiplier(CruiseVehicleAccess access, float boostLevel) {
+        float multiplier = 1.0f + cruiseMode(access).powerBonus() * Mth.clamp(boostLevel, 0.0f, 1.0f);
+        return Math.max(0.0f, multiplier);
+    }
+
+    private static float fuelMultiplier(CruiseVehicleAccess access, float boostLevel) {
+        float multiplier = 1.0f + cruiseMode(access).fuelBonus() * Mth.clamp(boostLevel, 0.0f, 1.0f);
+        return Math.max(0.0f, multiplier);
+    }
+
+    private static double controlledThrustMultiplier(VehicleEntity vehicle, double boostLevel) {
+        return Math.max(0.0d, 1.0d + controlledPowerBonus(vehicle, boostLevel));
+    }
+
+    private static double controlledPowerBonus(VehicleEntity vehicle, double boostLevel) {
+        return cruiseMode(vehicle).powerBonus() * Mth.clamp((float) boostLevel, 0.0f, 1.0f);
+    }
+
+    private static CruiseRoute.CruiseMode cruiseMode(Entity entity) {
+        if (entity instanceof CruiseVehicleAccess access) {
+            return cruiseMode(access);
+        }
+        return CruiseRoute.CruiseMode.SUPER_ACCELERATION;
+    }
+
+    private static CruiseRoute.CruiseMode cruiseMode(CruiseVehicleAccess access) {
+        CruiseRoute route = access.iacruise$getRoute();
+        return route == null ? CruiseRoute.CruiseMode.SUPER_ACCELERATION : route.getCruiseMode();
     }
 
     private static double enginePowerStep(EngineVehicle engineVehicle, InventoryVehicleEntity inventoryVehicle) {
@@ -1697,7 +1732,7 @@ public final class CruiseController {
             return;
         }
         float level = BOOST_LEVEL.getOrDefault(engineVehicle, 0.0f);
-        if (level <= 0.0f) {
+        if (Math.abs(controlledPowerBonus(vehicle, level)) <= 1.0E-6d) {
             CONTROLLER_VELOCITY_BEFORE.remove(vehicle);
             return;
         }
@@ -1714,7 +1749,8 @@ public final class CruiseController {
             return;
         }
         float level = BOOST_LEVEL.getOrDefault(engineVehicle, 0.0f);
-        if (level <= 0.0f) {
+        double powerBonus = controlledPowerBonus(vehicle, level);
+        if (Math.abs(powerBonus) <= 1.0E-6d) {
             return;
         }
         Vec3 after = vehicle.getDeltaMovement();
@@ -1722,7 +1758,7 @@ public final class CruiseController {
         if (controllerDelta.lengthSqr() <= 1.0E-8d) {
             return;
         }
-        vehicle.setDeltaMovement(after.add(controllerDelta.scale(level)));
+        vehicle.setDeltaMovement(after.add(controllerDelta.scale(powerBonus)));
     }
 
     private static float yawError(float currentYaw, double dx, double dz) {

@@ -12,7 +12,7 @@ import java.util.Properties;
 
 public final class CruiseHudSettings {
     public static final int WIDTH = 176;
-    public static final int HEIGHT = 92;
+    public static final int HEIGHT = 104;
 
     private static final Path PATH = FMLPaths.CONFIGDIR.get().resolve("immersive_aircraft_cruise_hud.properties");
     private static boolean loaded;

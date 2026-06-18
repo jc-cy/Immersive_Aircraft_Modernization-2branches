@@ -103,6 +103,12 @@ public class CruiseRoute {
         resetProgress();
     }
 
+    public void setSelectedRouteForEditing(int selectedRoute) {
+        this.selectedRoute = Math.max(0, selectedRoute);
+        clampSelectedRoute();
+        clampCurrentIndex();
+    }
+
     public int getCurrentIndex() {
         return currentIndex;
     }
@@ -277,6 +283,10 @@ public class CruiseRoute {
         return getSelectedEntry().landingMode();
     }
 
+    public CruiseMode getCruiseMode() {
+        return getSelectedEntry().cruiseMode();
+    }
+
     public LandingMode getEffectiveLandingMode() {
         LandingMode mode = getLandingMode();
         return mode.requiresFinalAltitude() && !hasFinalAltitudeOverride() ? LandingMode.HOLDING_PATTERN : mode;
@@ -313,6 +323,21 @@ public class CruiseRoute {
         if (source.selectedRoute != selectedRoute) {
             return;
         }
+        enabled = source.enabled;
+        holdingPattern = source.holdingPattern;
+        currentIndex = source.currentIndex;
+        startPoint = source.startPoint;
+        initialAltitudeReached = source.initialAltitudeReached;
+        clampCurrentIndex();
+    }
+
+    public void applyRuntimeAndSelectionFrom(CruiseRoute source) {
+        if (source == null) {
+            return;
+        }
+        hudEnabled = source.hudEnabled;
+        selectedRoute = source.selectedRoute;
+        clampSelectedRoute();
         enabled = source.enabled;
         holdingPattern = source.holdingPattern;
         currentIndex = source.currentIndex;
@@ -462,14 +487,74 @@ public class CruiseRoute {
         }
     }
 
-    public record RouteEntry(String name, int defaultAltitude, LandingMode landingMode, Integer landingAltitude, List<Waypoint> waypoints) {
+    public enum CruiseMode {
+        SUPER_ACCELERATION(0, "super_acceleration", 1.0f, 3.0f),
+        NORMAL(1, "normal", 0.2f, 0.0f),
+        ECO(2, "eco", -0.15f, -0.75f);
+
+        private final int id;
+        private final String serializedName;
+        private final float powerBonus;
+        private final float fuelBonus;
+
+        CruiseMode(int id, String serializedName, float powerBonus, float fuelBonus) {
+            this.id = id;
+            this.serializedName = serializedName;
+            this.powerBonus = powerBonus;
+            this.fuelBonus = fuelBonus;
+        }
+
+        public int id() {
+            return id;
+        }
+
+        public String serializedName() {
+            return serializedName;
+        }
+
+        public float powerBonus() {
+            return powerBonus;
+        }
+
+        public float fuelBonus() {
+            return fuelBonus;
+        }
+
+        public static CruiseMode byId(int id) {
+            for (CruiseMode mode : values()) {
+                if (mode.id == id) {
+                    return mode;
+                }
+            }
+            return SUPER_ACCELERATION;
+        }
+
+        public static CruiseMode byName(String name) {
+            for (CruiseMode mode : values()) {
+                if (mode.serializedName.equals(name)) {
+                    return mode;
+                }
+            }
+            return SUPER_ACCELERATION;
+        }
+    }
+
+    public record RouteEntry(String name, int defaultAltitude, CruiseMode cruiseMode, LandingMode landingMode,
+                             Integer landingAltitude, List<Waypoint> waypoints) {
         public static RouteEntry empty(String name) {
-            return new RouteEntry(name, 200, LandingMode.HOLDING_PATTERN, null, List.of());
+            return new RouteEntry(name, 200, CruiseMode.SUPER_ACCELERATION, LandingMode.HOLDING_PATTERN, null, List.of());
+        }
+
+        public RouteEntry(String name, int defaultAltitude, LandingMode landingMode, Integer landingAltitude, List<Waypoint> waypoints) {
+            this(name, defaultAltitude, CruiseMode.SUPER_ACCELERATION, landingMode, landingAltitude, waypoints);
         }
 
         public RouteEntry {
             if (name == null || name.isBlank()) {
                 name = defaultRouteName(1);
+            }
+            if (cruiseMode == null) {
+                cruiseMode = CruiseMode.SUPER_ACCELERATION;
             }
             if (landingMode == null) {
                 landingMode = LandingMode.HOLDING_PATTERN;
@@ -487,6 +572,7 @@ public class CruiseRoute {
         public void write(FriendlyByteBuf buffer) {
             buffer.writeUtf(name, 64);
             buffer.writeInt(defaultAltitude);
+            buffer.writeInt(cruiseMode.id());
             buffer.writeInt(landingMode.id());
             buffer.writeBoolean(landingAltitude != null);
             if (landingAltitude != null) {
@@ -501,6 +587,7 @@ public class CruiseRoute {
         public static RouteEntry read(FriendlyByteBuf buffer) {
             String name = buffer.readUtf(64);
             int defaultAltitude = buffer.readInt();
+            CruiseMode cruiseMode = CruiseMode.byId(buffer.readInt());
             LandingMode landingMode = LandingMode.byId(buffer.readInt());
             Integer landingAltitude = buffer.readBoolean() ? buffer.readInt() : null;
             int size = Math.min(buffer.readInt(), MAX_WAYPOINTS);
@@ -508,13 +595,14 @@ public class CruiseRoute {
             for (int i = 0; i < size; i++) {
                 waypoints.add(Waypoint.read(buffer));
             }
-            return new RouteEntry(name, defaultAltitude, landingMode, landingAltitude, waypoints);
+            return new RouteEntry(name, defaultAltitude, cruiseMode, landingMode, landingAltitude, waypoints);
         }
 
         public CompoundTag toTag() {
             CompoundTag tag = new CompoundTag();
             tag.putString("Name", name);
             tag.putInt("DefaultAltitude", defaultAltitude);
+            tag.putString("CruiseMode", cruiseMode.serializedName());
             tag.putString("LandingMode", landingMode.serializedName());
             if (landingAltitude != null) {
                 tag.putInt("LandingAltitude", landingAltitude);
@@ -535,6 +623,9 @@ public class CruiseRoute {
             }
             String name = tag.contains("Name", Tag.TAG_STRING) ? tag.getString("Name") : defaultRouteName(index);
             int defaultAltitude = tag.contains("DefaultAltitude", Tag.TAG_INT) ? tag.getInt("DefaultAltitude") : 200;
+            CruiseMode cruiseMode = tag.contains("CruiseMode", Tag.TAG_STRING)
+                    ? CruiseMode.byName(tag.getString("CruiseMode"))
+                    : CruiseMode.SUPER_ACCELERATION;
             LandingMode landingMode = tag.contains("LandingMode", Tag.TAG_STRING)
                     ? LandingMode.byName(tag.getString("LandingMode"))
                     : LandingMode.HOLDING_PATTERN;
@@ -546,7 +637,7 @@ public class CruiseRoute {
                     waypoints.set(waypoints.size() - 1, new Waypoint(finalWaypoint.x(), finalWaypoint.z(), null, finalWaypoint.name()));
                 }
             }
-            return new RouteEntry(name, defaultAltitude, landingMode, landingAltitude, waypoints);
+            return new RouteEntry(name, defaultAltitude, cruiseMode, landingMode, landingAltitude, waypoints);
         }
     }
 
