@@ -9,20 +9,25 @@ import net.minecraftforge.network.NetworkEvent;
 
 import java.util.function.Supplier;
 
-public record OpenCruiseScreenPacket(int entityId, CruiseRoute route) {
+public record OpenCruiseScreenPacket(int entityId, CruiseRoute route, boolean readOnly) {
+    public OpenCruiseScreenPacket(int entityId, CruiseRoute route) {
+        this(entityId, route, false);
+    }
+
     public void encode(FriendlyByteBuf buffer) {
         buffer.writeInt(entityId);
         route.write(buffer);
+        buffer.writeBoolean(readOnly);
     }
 
     public static OpenCruiseScreenPacket decode(FriendlyByteBuf buffer) {
-        return new OpenCruiseScreenPacket(buffer.readInt(), CruiseRoute.read(buffer));
+        return new OpenCruiseScreenPacket(buffer.readInt(), CruiseRoute.read(buffer), buffer.readBoolean());
     }
 
     public static void handle(OpenCruiseScreenPacket packet, Supplier<NetworkEvent.Context> contextSupplier) {
         NetworkEvent.Context context = contextSupplier.get();
         context.enqueueWork(() -> DistExecutor.unsafeRunWhenOn(Dist.CLIENT,
-                () -> () -> ClientPacketHandlers.openCruiseScreen(packet.entityId, packet.route)));
+                () -> () -> ClientPacketHandlers.openCruiseScreen(packet.entityId, packet.route, packet.readOnly)));
         context.setPacketHandled(true);
     }
 }

@@ -15,10 +15,11 @@ public record UpdateCruiseFuelPacket(int entityId, CruiseFuelInfo fuelInfo) {
         buffer.writeUtf(fuelInfo.amountText(), 32);
         buffer.writeInt(fuelInfo.remainingTicks());
         buffer.writeItem(fuelInfo.icon());
+        buffer.writeFloat(fuelInfo.speed());
     }
 
     public static UpdateCruiseFuelPacket decode(FriendlyByteBuf buffer) {
-        return new UpdateCruiseFuelPacket(buffer.readInt(), new CruiseFuelInfo(buffer.readUtf(32), buffer.readInt(), buffer.readItem()));
+        return new UpdateCruiseFuelPacket(buffer.readInt(), new CruiseFuelInfo(buffer.readUtf(32), buffer.readInt(), buffer.readItem(), buffer.readFloat()));
     }
 
     public static void handle(UpdateCruiseFuelPacket packet, Supplier<NetworkEvent.Context> contextSupplier) {

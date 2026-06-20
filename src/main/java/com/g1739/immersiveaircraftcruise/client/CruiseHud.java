@@ -66,8 +66,8 @@ public final class CruiseHud {
         graphics.renderItem(moduleIcon, x, y);
 
         int textX = x + 20;
-        double speed = vehicle.getDeltaMovement().length() * 20.0d;
         CruiseFuelInfo fuelInfo = FUEL_INFO.getOrDefault(vehicle.getId(), CruiseFuelInfo.EMPTY);
+        double speed = displaySpeed(vehicle, fuelInfo);
         ItemStack fuelIcon = fuelIcon(vehicle, fuelInfo);
         if (!fuelIcon.isEmpty()) {
             graphics.renderItem(fuelIcon, x, y + 20);
@@ -142,6 +142,11 @@ public final class CruiseHud {
 
     private static String format(double value) {
         return String.format(java.util.Locale.ROOT, "%.1f", value);
+    }
+
+    private static double displaySpeed(VehicleEntity vehicle, CruiseFuelInfo fuelInfo) {
+        double localSpeed = vehicle.getDeltaMovement().length() * 20.0d;
+        return localSpeed > 0.05d ? localSpeed : fuelInfo.speed();
     }
 
     private static String formatPoint(CruiseRoute.Waypoint waypoint) {

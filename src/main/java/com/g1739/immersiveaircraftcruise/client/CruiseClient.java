@@ -121,7 +121,9 @@ public final class CruiseClient {
             }
             Entity root = minecraft.player.getRootVehicle();
             if (root instanceof VehicleEntity vehicle && vehicle instanceof CruiseVehicleAccess access) {
-                if (access.iacruise$getRoute().hasAnyWaypoint()) {
+                if (vehicle.getControllingPassenger() == minecraft.player
+                        && access.iacruise$getRoute().isEnabled()
+                        && access.iacruise$getRoute().hasAnyWaypoint()) {
                     return new StopCruiseNavigationPacket(vehicle.getId(), access.iacruise$getRoute());
                 }
             }

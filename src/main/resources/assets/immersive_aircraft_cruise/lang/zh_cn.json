@@ -35,6 +35,7 @@
   "screen.immersive_aircraft_cruise.waypoint_name": "名称",
   "screen.immersive_aircraft_cruise.segment_altitude": "飞行高度",
   "screen.immersive_aircraft_cruise.landing_altitude": "地面高度",
+  "screen.immersive_aircraft_cruise.landing_altitude.tooltip": "地面的Y轴，一般是玩家的坐标-1。",
   "screen.immersive_aircraft_cruise.landing_mode": "降落方式",
   "screen.immersive_aircraft_cruise.landing_mode.value": "%s",
   "screen.immersive_aircraft_cruise.landing_mode.holding_pattern": "盘旋",

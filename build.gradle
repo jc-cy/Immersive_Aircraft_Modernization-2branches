@@ -13,6 +13,13 @@ base {
     archivesName = mod_name
 }
 
+def localImmersiveAircraftJar = rootProject.file('../local-deps/immersive_aircraft-1.4.1+1.20.1-forge.jar')
+def localImmersiveAircraftEnabled = (findProperty('immersive_aircraft_use_local') ?: 'true').toString().toBoolean()
+def useLocalImmersiveAircraft = localImmersiveAircraftEnabled && localImmersiveAircraftJar.isFile()
+logger.lifecycle("Immersive Aircraft dependency: " + (useLocalImmersiveAircraft
+        ? "local file ${localImmersiveAircraftJar}"
+        : "remote net.conczin:immersive_aircraft:${immersive_aircraft_version}"))
+
 java {
     toolchain.languageVersion = JavaLanguageVersion.of(17)
     withSourcesJar()
@@ -57,8 +64,13 @@ repositories {
 
 dependencies {
     minecraft "net.minecraftforge:forge:${minecraft_version}-${forge_version}"
-    compileOnly "net.conczin:immersive_aircraft:${immersive_aircraft_version}"
-    runtimeOnly "net.conczin:immersive_aircraft:${immersive_aircraft_version}"
+    if (useLocalImmersiveAircraft) {
+        compileOnly files(localImmersiveAircraftJar)
+        runtimeOnly files(localImmersiveAircraftJar)
+    } else {
+        compileOnly "net.conczin:immersive_aircraft:${immersive_aircraft_version}"
+        runtimeOnly "net.conczin:immersive_aircraft:${immersive_aircraft_version}"
+    }
     annotationProcessor 'org.spongepowered:mixin:0.8.5:processor'
 }
 

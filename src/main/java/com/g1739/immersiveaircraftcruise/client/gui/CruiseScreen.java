@@ -54,6 +54,7 @@ public class CruiseScreen extends Screen {
 
     private final int entityId;
     private CruiseRoute route;
+    private final boolean readOnly;
     private final List<DraftWaypoint> waypoints = new ArrayList<>();
     private final List<EditBox> editBoxes = new ArrayList<>();
     private String routeName;
@@ -73,9 +74,14 @@ public class CruiseScreen extends Screen {
     private int dragOffsetY;
 
     public CruiseScreen(int entityId, CruiseRoute route) {
+        this(entityId, route, false);
+    }
+
+    public CruiseScreen(int entityId, CruiseRoute route, boolean readOnly) {
         super(Component.translatable("screen.immersive_aircraft_cruise.title"));
         this.entityId = entityId;
         this.route = route.copy();
+        this.readOnly = readOnly;
         loadSelectedRoute();
     }
 
@@ -127,7 +133,7 @@ public class CruiseScreen extends Screen {
                 .bounds(left, top, 22, 20).build());
         addRenderableWidget(Button.builder(Component.literal(">"), button -> selectRoute(route.getSelectedRoute() + 1))
                 .bounds(left + 26, top, 22, 20).build());
-        addRenderableWidget(Button.builder(Component.translatable("screen.immersive_aircraft_cruise.new_route"), button -> {
+        addWritableWidget(Button.builder(Component.translatable("screen.immersive_aircraft_cruise.new_route"), button -> {
             updateSelectedEntry();
             route.addRoute();
             loadSelectedRoute();
@@ -136,13 +142,13 @@ public class CruiseScreen extends Screen {
             autoSaveDraft();
             rebuildCruiseWidgets();
         }).bounds(left + 52, top, 50, 20).build());
-        addRenderableWidget(Button.builder(deleteRouteLabel(), button -> deleteRoute(button))
+        addWritableWidget(Button.builder(deleteRouteLabel(), button -> deleteRoute(button))
                 .bounds(left + 106, top, 70, 20).build());
         addRenderableWidget(Button.builder(hudMoveLabel(), button -> {
             movingHud = !movingHud;
             button.setMessage(hudMoveLabel());
         }).bounds(left + panelWidth - 180, top, 92, 20).build());
-        addRenderableWidget(Button.builder(hudLabel(), button -> {
+        addWritableWidget(Button.builder(hudLabel(), button -> {
             toggleHud(button);
         }).bounds(left + panelWidth - 84, top, 84, 20).build());
 
@@ -154,8 +160,7 @@ public class CruiseScreen extends Screen {
             routeName = value;
             markDirty();
         });
-        addRenderableWidget(routeNameBox);
-        editBoxes.add(routeNameBox);
+        addEditBox(routeNameBox);
 
         defaultAltitudeBox = new EditBox(font, routeRow.secondControlX(), ROUTE_SETTINGS_ROW_Y, DEFAULT_ALTITUDE_FIELD_WIDTH, 20,
                 Component.translatable("screen.immersive_aircraft_cruise.default_altitude"));
@@ -165,8 +170,7 @@ public class CruiseScreen extends Screen {
             updateDefaultAltitude();
             markDirty();
         });
-        addRenderableWidget(defaultAltitudeBox);
-        editBoxes.add(defaultAltitudeBox);
+        addEditBox(defaultAltitudeBox);
 
         Button cruiseModeButton = Button.builder(cruiseModeLabel(), button -> {
             cruiseMode = nextCruiseMode();
@@ -179,7 +183,7 @@ public class CruiseScreen extends Screen {
                 .tooltip(cruiseModeTooltip())
                 .build();
         cruiseModeButton.setFGColor(cruiseModeTextColor());
-        addRenderableWidget(cruiseModeButton);
+        addWritableWidget(cruiseModeButton);
 
         int listTop = top + 76;
         int visibleRows = visibleRows(listTop);
@@ -202,30 +206,47 @@ public class CruiseScreen extends Screen {
             autoSaveDraft();
         }).bounds(landingRow.firstControlX(), landingY, landingModeButtonWidth(), 20).build();
         landingModeButton.setTooltip(landingModeTooltip());
-        addRenderableWidget(landingModeButton);
+        addWritableWidget(landingModeButton);
 
         landingAltitudeBox = new EditBox(font, landingRow.secondControlX(), landingY, LANDING_ALTITUDE_FIELD_WIDTH, 20,
                 Component.translatable("screen.immersive_aircraft_cruise.landing_altitude"));
         landingAltitudeBox.setFilter(CruiseScreen::isSignedIntegerText);
         landingAltitudeBox.setValue(landingAltitude == null ? "" : Integer.toString(landingAltitude));
+        landingAltitudeBox.setTooltip(landingAltitudeTooltip());
         landingAltitudeBox.setResponder(value -> {
             updateLandingAltitude();
             landingModeButton.setMessage(landingModeLabel());
             landingModeButton.setTooltip(landingModeTooltip());
             markDirty();
         });
-        addRenderableWidget(landingAltitudeBox);
-        editBoxes.add(landingAltitudeBox);
+        addEditBox(landingAltitudeBox);
 
         int buttonY = height - 28;
-        addRenderableWidget(Button.builder(Component.translatable("screen.immersive_aircraft_cruise.add_current"), button -> addCurrentPosition())
+        addWritableWidget(Button.builder(Component.translatable("screen.immersive_aircraft_cruise.add_current"), button -> addCurrentPosition())
                 .bounds(left, buttonY, 86, 20).build());
-        addRenderableWidget(Button.builder(Component.translatable("screen.immersive_aircraft_cruise.clear"), button -> confirmClearWaypoints())
+        addWritableWidget(Button.builder(Component.translatable("screen.immersive_aircraft_cruise.clear"), button -> confirmClearWaypoints())
                 .bounds(left + 92, buttonY, 58, 20).build());
-        addRenderableWidget(Button.builder(Component.translatable("screen.immersive_aircraft_cruise.save_refresh"), button -> saveRoute(true, true))
+        addWritableWidget(Button.builder(Component.translatable("screen.immersive_aircraft_cruise.save_refresh"), button -> saveRoute(true, true))
                 .bounds(left + panelWidth - 164, buttonY, 98, 20).build());
         addRenderableWidget(Button.builder(Component.translatable("screen.immersive_aircraft_cruise.cancel"), button -> onClose())
                 .bounds(left + panelWidth - 62, buttonY, 62, 20).build());
+    }
+
+    private Button addWritableWidget(Button button) {
+        if (readOnly) {
+            button.active = false;
+        }
+        return addRenderableWidget(button);
+    }
+
+    private EditBox addEditBox(EditBox editBox) {
+        editBox.setEditable(!readOnly);
+        if (readOnly) {
+            editBox.active = false;
+        }
+        addRenderableWidget(editBox);
+        editBoxes.add(editBox);
+        return editBox;
     }
 
     private void addWaypointWidgets(int left, int y, int index) {
@@ -235,24 +256,21 @@ public class CruiseScreen extends Screen {
             waypoint.x = value;
             markDirty();
         });
-        addRenderableWidget(xBox);
-        editBoxes.add(xBox);
+        addEditBox(xBox);
 
         EditBox zBox = editBox(left + Z_FIELD_X, y, FIELD_WIDTH, waypoint.z);
         zBox.setResponder(value -> {
             waypoint.z = value;
             markDirty();
         });
-        addRenderableWidget(zBox);
-        editBoxes.add(zBox);
+        addEditBox(zBox);
 
         EditBox altitudeBox = editBox(left + ALTITUDE_FIELD_X, y, FIELD_WIDTH, waypoint.altitude);
         altitudeBox.setResponder(value -> {
             waypoint.altitude = value;
             markDirty();
         });
-        addRenderableWidget(altitudeBox);
-        editBoxes.add(altitudeBox);
+        addEditBox(altitudeBox);
 
         EditBox nameBox = new EditBox(font, left + NAME_FIELD_X, y, NAME_FIELD_WIDTH, 20, Component.empty());
         nameBox.setValue(waypoint.name);
@@ -261,10 +279,9 @@ public class CruiseScreen extends Screen {
             waypoint.name = value;
             markDirty();
         });
-        addRenderableWidget(nameBox);
-        editBoxes.add(nameBox);
+        addEditBox(nameBox);
 
-        addRenderableWidget(Button.builder(Component.literal("x"), button -> {
+        addWritableWidget(Button.builder(Component.literal("x"), button -> {
             waypoints.remove(index);
             scrollOffset = Math.min(scrollOffset, maxScrollOffset(visibleRows(104)));
             markDirty();
@@ -273,7 +290,7 @@ public class CruiseScreen extends Screen {
         }).bounds(left + DELETE_BUTTON_X, y, 18, 20).build());
 
         if (index > 0) {
-            addRenderableWidget(Button.builder(Component.literal("^"), button -> {
+            addWritableWidget(Button.builder(Component.literal("^"), button -> {
                 swap(index, index - 1);
                 markDirty();
                 autoSaveDraft();
@@ -282,7 +299,7 @@ public class CruiseScreen extends Screen {
         }
 
         if (index + 1 < waypoints.size()) {
-            addRenderableWidget(Button.builder(Component.literal("v"), button -> {
+            addWritableWidget(Button.builder(Component.literal("v"), button -> {
                 swap(index, index + 1);
                 markDirty();
                 autoSaveDraft();
@@ -302,8 +319,10 @@ public class CruiseScreen extends Screen {
         if (index < 0 || index >= route.getRoutes().size()) {
             return;
         }
-        updateSelectedEntry();
-        autoSaveDraft();
+        if (!readOnly) {
+            updateSelectedEntry();
+            autoSaveDraft();
+        }
         route.setSelectedRouteForEditing(index);
         loadSelectedRoute();
         confirmDeleteRoute = false;
@@ -312,6 +331,9 @@ public class CruiseScreen extends Screen {
     }
 
     private void deleteRoute(Button button) {
+        if (readOnly) {
+            return;
+        }
         if (!confirmDeleteRoute) {
             confirmDeleteRoute = true;
             button.setMessage(deleteRouteLabel());
@@ -327,6 +349,9 @@ public class CruiseScreen extends Screen {
     }
 
     private void addCurrentPosition() {
+        if (readOnly) {
+            return;
+        }
         if (waypoints.size() >= CruiseRoute.MAX_WAYPOINTS || minecraft == null || minecraft.player == null) {
             return;
         }
@@ -340,6 +365,9 @@ public class CruiseScreen extends Screen {
     }
 
     private void confirmClearWaypoints() {
+        if (readOnly) {
+            return;
+        }
         if (minecraft == null) {
             clearWaypoints();
             return;
@@ -359,6 +387,9 @@ public class CruiseScreen extends Screen {
     }
 
     private void clearWaypoints() {
+        if (readOnly) {
+            return;
+        }
         waypoints.clear();
         scrollOffset = 0;
         markDirty();
@@ -367,6 +398,9 @@ public class CruiseScreen extends Screen {
     }
 
     private void saveRoute(boolean refreshProgress, boolean showMessage) {
+        if (readOnly) {
+            return;
+        }
         updateSelectedEntry();
         CruiseRoute draft = route.copy();
         CruiseRoute saved = draft.copy();
@@ -395,6 +429,9 @@ public class CruiseScreen extends Screen {
     }
 
     private void autoSaveDraft() {
+        if (readOnly) {
+            return;
+        }
         if (dirty) {
             saveRoute(false, false);
         }
@@ -546,6 +583,10 @@ public class CruiseScreen extends Screen {
                 : null;
     }
 
+    private Tooltip landingAltitudeTooltip() {
+        return Tooltip.create(Component.translatable("screen.immersive_aircraft_cruise.landing_altitude.tooltip"));
+    }
+
     private CruiseRoute.CruiseMode nextCruiseMode() {
         CruiseRoute.CruiseMode[] modes = CruiseRoute.CruiseMode.values();
         return modes[(effectiveCruiseMode().ordinal() + 1) % modes.length];
@@ -590,10 +631,16 @@ public class CruiseScreen extends Screen {
     }
 
     private void markDirty() {
+        if (readOnly) {
+            return;
+        }
         dirty = true;
     }
 
     private void toggleHud(Button button) {
+        if (readOnly) {
+            return;
+        }
         boolean hudEnabled = !route.isHudEnabled();
         route.setHudEnabled(hudEnabled);
         button.setMessage(hudLabel());

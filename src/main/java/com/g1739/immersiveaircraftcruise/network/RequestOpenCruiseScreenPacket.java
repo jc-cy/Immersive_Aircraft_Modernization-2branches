@@ -73,15 +73,18 @@ public class RequestOpenCruiseScreenPacket {
                 return;
             }
             Entity root = player.getRootVehicle();
-            if (root instanceof VehicleEntity vehicle && CruiseController.isPilot(vehicle, player)) {
+            if (root instanceof VehicleEntity vehicle) {
                 if (!CruiseController.hasCruiseModule(vehicle)) {
                     player.displayClientMessage(Component.translatable("message.immersive_aircraft_cruise.requires_module"), true);
                     return;
                 }
-                CruiseRoute route = CruiseController.routeForOpeningScreen(vehicle, packet.selectedRoute,
-                        packet.currentIndex, packet.holdingPattern, packet.initialAltitudeReached, packet.startPoint).copy();
+                boolean pilot = CruiseController.isPilot(vehicle, player);
+                CruiseRoute route = pilot
+                        ? CruiseController.routeForOpeningScreen(vehicle, packet.selectedRoute,
+                        packet.currentIndex, packet.holdingPattern, packet.initialAltitudeReached, packet.startPoint).copy()
+                        : CruiseController.currentRoute(vehicle).copy();
                 CruiseNetwork.CHANNEL.send(PacketDistributor.PLAYER.with(() -> player),
-                        new OpenCruiseScreenPacket(vehicle.getId(), route.copy()));
+                        new OpenCruiseScreenPacket(vehicle.getId(), route.copy(), !pilot));
             }
         });
         context.setPacketHandled(true);

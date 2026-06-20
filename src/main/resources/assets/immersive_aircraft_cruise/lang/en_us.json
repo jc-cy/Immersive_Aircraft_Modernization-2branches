@@ -35,6 +35,7 @@
   "screen.immersive_aircraft_cruise.waypoint_name": "Name",
   "screen.immersive_aircraft_cruise.segment_altitude": "Flight Y",
   "screen.immersive_aircraft_cruise.landing_altitude": "Ground Y",
+  "screen.immersive_aircraft_cruise.landing_altitude.tooltip": "Ground Y axis, usually the player's Y coordinate - 1.",
   "screen.immersive_aircraft_cruise.landing_mode": "Landing mode",
   "screen.immersive_aircraft_cruise.landing_mode.value": "%s",
   "screen.immersive_aircraft_cruise.landing_mode.holding_pattern": "Holding pattern",

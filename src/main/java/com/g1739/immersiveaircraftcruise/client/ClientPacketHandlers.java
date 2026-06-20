@@ -16,14 +16,14 @@ public final class ClientPacketHandlers {
     private ClientPacketHandlers() {
     }
 
-    public static void openCruiseScreen(int entityId, CruiseRoute route) {
+    public static void openCruiseScreen(int entityId, CruiseRoute route, boolean readOnly) {
         Minecraft minecraft = Minecraft.getInstance();
         if (minecraft.level == null) {
             return;
         }
         Entity entity = minecraft.level.getEntity(entityId);
         if (entityId < 0 || (entity instanceof VehicleEntity && entity instanceof CruiseVehicleAccess)) {
-            minecraft.setScreen(new CruiseScreen(entityId, route.copy()));
+            minecraft.setScreen(new CruiseScreen(entityId, route.copy(), readOnly));
         }
     }
 

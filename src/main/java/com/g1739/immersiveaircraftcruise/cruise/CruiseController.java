@@ -93,10 +93,12 @@ public final class CruiseController {
     private static final float ALTITUDE_SMOOTHING = 0.18f;
     private static final float BOOST_RISE_PER_TICK = 0.08f;
     private static final float BOOST_FALL_PER_TICK = 0.06f;
+    private static final double HUD_SPEED_MAX = 512.0d;
     private static final Map<VehicleEntity, Float> TURN_MEMORY = new WeakHashMap<>();
     private static final Map<VehicleEntity, Float> ALTITUDE_MEMORY = new WeakHashMap<>();
     private static final Map<EngineVehicle, Float> BOOST_LEVEL = new WeakHashMap<>();
     private static final Map<VehicleEntity, Vec3> CONTROLLER_VELOCITY_BEFORE = new WeakHashMap<>();
+    private static final Map<VehicleEntity, SpeedSample> HUD_SPEED_SAMPLES = new WeakHashMap<>();
     private static final Map<VehicleEntity, ItemStack> ACTIVE_MODULE = new WeakHashMap<>();
     private static final Map<VehicleEntity, String> ACTIVE_MODULE_ID = new WeakHashMap<>();
     private static final Map<VehicleEntity, Boolean> LANDING_ACTIVE = new WeakHashMap<>();
@@ -1836,18 +1838,16 @@ public final class CruiseController {
     }
 
     private static void syncRouteToClient(VehicleEntity vehicle, CruiseRoute route) {
-        if (!(vehicle.getControllingPassenger() instanceof ServerPlayer player)) {
-            return;
+        for (Entity passenger : vehicle.getPassengers()) {
+            if (passenger instanceof ServerPlayer player) {
+                CruiseNetwork.CHANNEL.send(PacketDistributor.PLAYER.with(() -> player),
+                        new UpdateCruiseRoutePacket(vehicle.getId(), route.copy()));
+            }
         }
-        CruiseNetwork.CHANNEL.send(PacketDistributor.PLAYER.with(() -> player),
-                new UpdateCruiseRoutePacket(vehicle.getId(), route.copy()));
     }
 
     private static void syncFuelInfo(VehicleEntity vehicle, EngineVehicle engineVehicle) {
         if (vehicle.tickCount % 20 != 0) {
-            return;
-        }
-        if (!(vehicle.getControllingPassenger() instanceof ServerPlayer player)) {
             return;
         }
         List<SlotDescription> slots = engineVehicle.getInventoryDescription().getSlots(VehicleInventoryDescription.BOILER);
@@ -1866,8 +1866,27 @@ public final class CruiseController {
         }
         float consumption = Math.max(0.0f, engineVehicle.getFuelConsumption());
         int remainingTicks = consumption <= 0.0f ? -1 : clampTicks((storedFuel + display.pendingFuel()) / (double) consumption);
-        CruiseNetwork.CHANNEL.send(PacketDistributor.PLAYER.with(() -> player),
-                new UpdateCruiseFuelPacket(vehicle.getId(), new CruiseFuelInfo(display.amountText(), remainingTicks, icon)));
+        float speed = hudSpeed(vehicle);
+        CruiseFuelInfo fuelInfo = new CruiseFuelInfo(display.amountText(), remainingTicks, icon, speed);
+        for (Entity passenger : vehicle.getPassengers()) {
+            if (passenger instanceof ServerPlayer player) {
+                CruiseNetwork.CHANNEL.send(PacketDistributor.PLAYER.with(() -> player),
+                        new UpdateCruiseFuelPacket(vehicle.getId(), fuelInfo));
+            }
+        }
+    }
+
+    private static float hudSpeed(VehicleEntity vehicle) {
+        Vec3 position = vehicle.position();
+        SpeedSample previous = HUD_SPEED_SAMPLES.put(vehicle, new SpeedSample(position, vehicle.tickCount));
+        double sampledSpeed = 0.0d;
+        if (previous != null) {
+            int elapsedTicks = Math.max(1, vehicle.tickCount - previous.tickCount());
+            sampledSpeed = position.distanceTo(previous.position()) * 20.0d / elapsedTicks;
+        }
+        double velocitySpeed = vehicle.getDeltaMovement().length() * 20.0d;
+        double speed = sampledSpeed > 0.05d ? sampledSpeed : velocitySpeed;
+        return (float) Mth.clamp(speed, 0.0d, HUD_SPEED_MAX);
     }
 
     private static int displayedFuelSlot(EngineVehicle engineVehicle, List<SlotDescription> slots, int[] fuel) {
@@ -1967,6 +1986,9 @@ public final class CruiseController {
         private static FuelSlotDisplay empty() {
             return new FuelSlotDisplay("0", 0L, ItemStack.EMPTY);
         }
+    }
+
+    private record SpeedSample(Vec3 position, int tickCount) {
     }
 
     public static Vec3 targetPosition(VehicleEntity vehicle) {
