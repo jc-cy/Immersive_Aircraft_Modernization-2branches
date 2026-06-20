@@ -93,9 +93,8 @@ public class ToggleCruiseNavigationPacket {
             packet.mergeClientProgress(vehicle, route);
 
             if (route.isEnabled()) {
-                route.stopNavigation();
-                CruiseController.stopNavigationEffects(vehicle);
-                player.displayClientMessage(Component.translatable("message.immersive_aircraft_cruise.disabled"), true);
+                CruiseController.stopNavigation(vehicle, route, player);
+                return;
             } else {
                 boolean resumed = route.hasStartPoint();
                 route.resume(startPoint(vehicle));

@@ -1,15 +1,12 @@
 package com.g1739.immersiveaircraftcruise.network;
 
 import com.g1739.immersiveaircraftcruise.cruise.CruiseController;
-import com.g1739.immersiveaircraftcruise.cruise.CruiseModuleData;
 import com.g1739.immersiveaircraftcruise.cruise.CruiseRoute;
 import immersive_aircraft.entity.VehicleEntity;
 import net.minecraft.network.FriendlyByteBuf;
-import net.minecraft.network.chat.Component;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.entity.Entity;
 import net.minecraftforge.network.NetworkEvent;
-import net.minecraftforge.network.PacketDistributor;
 
 import java.util.function.Supplier;
 
@@ -84,16 +81,7 @@ public class StopCruiseNavigationPacket {
                 return;
             }
             packet.mergeClientProgress(vehicle, route);
-            route.stopNavigation();
-            CruiseController.stopNavigationEffects(vehicle);
-
-            CruiseModuleData.write(vehicle, route);
-            if (vehicle instanceof com.g1739.immersiveaircraftcruise.cruise.CruiseVehicleAccess access) {
-                access.iacruise$setRoute(route.copy());
-            }
-            CruiseNetwork.CHANNEL.send(PacketDistributor.PLAYER.with(() -> player),
-                    new UpdateCruiseRoutePacket(vehicle.getId(), route.copy()));
-            player.displayClientMessage(Component.translatable("message.immersive_aircraft_cruise.disabled"), true);
+            CruiseController.stopNavigation(vehicle, route, player);
         });
         context.setPacketHandled(true);
     }

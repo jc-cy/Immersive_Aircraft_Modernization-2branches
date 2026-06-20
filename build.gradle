@@ -22,7 +22,6 @@ logger.lifecycle("Immersive Aircraft dependency: " + (useLocalImmersiveAircraft
 
 java {
     toolchain.languageVersion = JavaLanguageVersion.of(17)
-    withSourcesJar()
 }
 
 minecraft {
