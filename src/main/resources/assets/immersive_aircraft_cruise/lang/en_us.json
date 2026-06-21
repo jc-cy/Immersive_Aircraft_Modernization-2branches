@@ -58,5 +58,11 @@
   "tooltip.immersive_aircraft_cruise.cruise_module_quote": "Top-tier technology beyond all limits.",
   "tooltip.immersive_aircraft_cruise.cruise_module": "In an aircraft, press [%s] or right-click while held to open routes; press [%s] to enter auto navigation mode.",
   "tooltip.immersive_aircraft_cruise.cruise_module_boost": "Successful route correction sharply increases fuel consumption and enters %s!",
-  "tooltip.immersive_aircraft_cruise.overclock_mode": "Overclock Mode"
+  "tooltip.immersive_aircraft_cruise.overclock_mode": "Overclock Mode",
+  "advancements.immersive_aircraft_cruise.root.title": "Immersive Aircraft: Modernization",
+  "advancements.immersive_aircraft_cruise.root.description": "Open a new instrument panel for automatic routes in the sky.",
+  "advancements.immersive_aircraft_cruise.cruise_core.title": "Guidance Core",
+  "advancements.immersive_aircraft_cruise.cruise_core.description": "Obtain an Overclocked Cruise Guidance Module.",
+  "advancements.immersive_aircraft_cruise.speed_117.title": "Above the Clouds",
+  "advancements.immersive_aircraft_cruise.speed_117.description": "Ride an aircraft with an Overclocked Cruise Guidance Module past 117 blocks per second."
 }

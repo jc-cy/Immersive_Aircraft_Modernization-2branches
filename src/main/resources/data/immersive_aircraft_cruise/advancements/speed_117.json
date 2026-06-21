@@ -1,0 +1,29 @@
+{
+  "parent": "immersive_aircraft_cruise:cruise_core",
+  "display": {
+    "icon": {
+      "item": "immersive_aircraft_cruise:cruise_module",
+      "nbt": "{ImmersiveAircraftCruiseBoosting:1b}"
+    },
+    "title": {
+      "translate": "advancements.immersive_aircraft_cruise.speed_117.title"
+    },
+    "description": {
+      "translate": "advancements.immersive_aircraft_cruise.speed_117.description"
+    },
+    "frame": "challenge",
+    "show_toast": true,
+    "announce_to_chat": true,
+    "hidden": false
+  },
+  "criteria": {
+    "speed_117": {
+      "trigger": "minecraft:impossible"
+    }
+  },
+  "requirements": [
+    [
+      "speed_117"
+    ]
+  ]
+}

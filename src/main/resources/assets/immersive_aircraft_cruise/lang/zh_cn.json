@@ -58,5 +58,11 @@
   "tooltip.immersive_aircraft_cruise.cruise_module_quote": "超越极限的顶级科技。",
   "tooltip.immersive_aircraft_cruise.cruise_module": "飞机内按下[%s]或手持右键打开航线，按下[%s]后进入自动导航模式。",
   "tooltip.immersive_aircraft_cruise.cruise_module_boost": "航线修正成功时将急剧增加燃料消耗，并进入%s！",
-  "tooltip.immersive_aircraft_cruise.overclock_mode": "超频模式"
+  "tooltip.immersive_aircraft_cruise.overclock_mode": "超频模式",
+  "advancements.immersive_aircraft_cruise.root.title": "沉浸式飞机：现代化",
+  "advancements.immersive_aircraft_cruise.root.description": "来自空中的尖端科技",
+  "advancements.immersive_aircraft_cruise.cruise_core.title": "巡导核心",
+  "advancements.immersive_aircraft_cruise.cruise_core.description": "获得超频巡导模块。",
+  "advancements.immersive_aircraft_cruise.speed_117.title": "云上疾驰",
+  "advancements.immersive_aircraft_cruise.speed_117.description": "自动导航时秒速达到117格"
 }

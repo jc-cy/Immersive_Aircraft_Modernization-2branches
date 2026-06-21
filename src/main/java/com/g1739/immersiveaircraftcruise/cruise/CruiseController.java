@@ -1,5 +1,6 @@
 package com.g1739.immersiveaircraftcruise.cruise;
 
+import com.g1739.immersiveaircraftcruise.ImmersiveAircraftCruise;
 import com.g1739.immersiveaircraftcruise.mixin.EngineVehicleAccessor;
 import com.g1739.immersiveaircraftcruise.network.CruiseNetwork;
 import com.g1739.immersiveaircraftcruise.network.UpdateCruiseFuelPacket;
@@ -13,7 +14,9 @@ import immersive_aircraft.entity.inventory.VehicleInventoryDescription;
 import immersive_aircraft.entity.inventory.slots.SlotDescription;
 import immersive_aircraft.entity.misc.BoundingBoxDescriptor;
 import immersive_aircraft.item.upgrade.VehicleStat;
+import net.minecraft.advancements.Advancement;
 import net.minecraft.network.chat.Component;
+import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.util.Mth;
 import net.minecraft.world.entity.Entity;
@@ -95,6 +98,8 @@ public final class CruiseController {
     private static final float BOOST_RISE_PER_TICK = 0.08f;
     private static final float BOOST_FALL_PER_TICK = 0.06f;
     private static final double HUD_SPEED_MAX = 512.0d;
+    private static final float SPEED_ADVANCEMENT_THRESHOLD = 117.0f;
+    private static final ResourceLocation SPEED_ADVANCEMENT_ID = new ResourceLocation(ImmersiveAircraftCruise.MOD_ID, "speed_117");
     private static final Map<VehicleEntity, Float> TURN_MEMORY = new WeakHashMap<>();
     private static final Map<VehicleEntity, Float> ALTITUDE_MEMORY = new WeakHashMap<>();
     private static final Map<EngineVehicle, Float> BOOST_LEVEL = new WeakHashMap<>();
@@ -1949,9 +1954,20 @@ public final class CruiseController {
         CruiseFuelInfo fuelInfo = new CruiseFuelInfo(display.amountText(), remainingTicks, icon, speed);
         for (Entity passenger : vehicle.getPassengers()) {
             if (passenger instanceof ServerPlayer player) {
+                awardSpeedAdvancement(player, speed);
                 CruiseNetwork.CHANNEL.send(PacketDistributor.PLAYER.with(() -> player),
                         new UpdateCruiseFuelPacket(vehicle.getId(), fuelInfo));
             }
+        }
+    }
+
+    private static void awardSpeedAdvancement(ServerPlayer player, float speed) {
+        if (speed < SPEED_ADVANCEMENT_THRESHOLD) {
+            return;
+        }
+        Advancement advancement = player.server.getAdvancements().getAdvancement(SPEED_ADVANCEMENT_ID);
+        if (advancement != null && !player.getAdvancements().getOrStartProgress(advancement).isDone()) {
+            player.getAdvancements().award(advancement, "speed_117");
         }
     }
 

@@ -1,0 +1,28 @@
+{
+  "display": {
+    "icon": {
+      "item": "immersive_aircraft_cruise:cruise_module"
+    },
+    "title": {
+      "translate": "advancements.immersive_aircraft_cruise.root.title"
+    },
+    "description": {
+      "translate": "advancements.immersive_aircraft_cruise.root.description"
+    },
+    "background": "immersive_aircraft_cruise:textures/gui/advancements/clouds.png",
+    "frame": "task",
+    "show_toast": false,
+    "announce_to_chat": false,
+    "hidden": false
+  },
+  "criteria": {
+    "tick": {
+      "trigger": "minecraft:tick"
+    }
+  },
+  "requirements": [
+    [
+      "tick"
+    ]
+  ]
+}
