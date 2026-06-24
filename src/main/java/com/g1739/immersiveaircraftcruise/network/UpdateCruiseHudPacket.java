@@ -54,6 +54,7 @@ public record UpdateCruiseHudPacket(int entityId, RouteStorageTarget target, boo
                 if (vehicle instanceof com.g1739.immersiveaircraftcruise.cruise.CruiseVehicleAccess access) {
                     access.iacruise$setRoute(route.copy());
                 }
+                CruiseController.syncRouteToPassengers(vehicle, route);
             }
         });
         context.setPacketHandled(true);

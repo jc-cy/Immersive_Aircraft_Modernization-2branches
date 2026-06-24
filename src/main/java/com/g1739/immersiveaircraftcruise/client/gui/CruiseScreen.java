@@ -488,6 +488,12 @@ public class CruiseScreen extends Screen {
     }
 
     public void updateRuntime(CruiseRoute syncedRoute) {
+        if (syncedRoute != null && readOnly) {
+            route = syncedRoute.copy();
+            loadSelectedRoute();
+            rebuildCruiseWidgets();
+            return;
+        }
         if (syncedRoute == null || syncedRoute.getSelectedRoute() != route.getSelectedRoute()) {
             return;
         }
@@ -578,9 +584,13 @@ public class CruiseScreen extends Screen {
     }
 
     private Tooltip landingModeTooltip() {
-        return effectiveLandingModeFromDrafts() == CruiseRoute.LandingMode.FASTEST
-                ? Tooltip.create(Component.translatable("screen.immersive_aircraft_cruise.landing_mode.fastest.tooltip"))
-                : null;
+        return switch (effectiveLandingModeFromDrafts()) {
+            case FASTEST -> Tooltip.create(Component.translatable(
+                    "screen.immersive_aircraft_cruise.landing_mode.fastest.tooltip"));
+            case VERTICAL -> Tooltip.create(Component.translatable(
+                    "screen.immersive_aircraft_cruise.landing_mode.vertical.tooltip"));
+            default -> null;
+        };
     }
 
     private Tooltip landingAltitudeTooltip() {

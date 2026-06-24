@@ -2,8 +2,8 @@ package com.g1739.immersiveaircraftcruise.cruise;
 
 import net.minecraft.world.item.ItemStack;
 
-public record CruiseFuelInfo(String amountText, int remainingTicks, ItemStack icon, float speed) {
-    public static final CruiseFuelInfo EMPTY = new CruiseFuelInfo("0", -1, ItemStack.EMPTY, 0.0f);
+public record CruiseFuelInfo(String amountText, int remainingTicks, ItemStack icon, float speed, boolean boosting) {
+    public static final CruiseFuelInfo EMPTY = new CruiseFuelInfo("0", -1, ItemStack.EMPTY, 0.0f, false);
 
     public CruiseFuelInfo {
         if (amountText == null || amountText.isBlank()) {
@@ -18,11 +18,15 @@ public record CruiseFuelInfo(String amountText, int remainingTicks, ItemStack ic
     }
 
     public CruiseFuelInfo(String amountText, int remainingTicks, ItemStack icon) {
-        this(amountText, remainingTicks, icon, 0.0f);
+        this(amountText, remainingTicks, icon, 0.0f, false);
+    }
+
+    public CruiseFuelInfo(String amountText, int remainingTicks, ItemStack icon, float speed) {
+        this(amountText, remainingTicks, icon, speed, false);
     }
 
     public CruiseFuelInfo(int amount, int remainingTicks, ItemStack icon) {
-        this(Integer.toString(amount), remainingTicks, icon, 0.0f);
+        this(Integer.toString(amount), remainingTicks, icon, 0.0f, false);
     }
 
     public CruiseFuelInfo(int amount, int remainingTicks) {

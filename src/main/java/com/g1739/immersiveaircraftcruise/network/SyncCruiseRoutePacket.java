@@ -11,7 +11,6 @@ import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.item.ItemStack;
 import net.minecraftforge.network.NetworkEvent;
-import net.minecraftforge.network.PacketDistributor;
 
 import java.util.function.Supplier;
 
@@ -61,8 +60,7 @@ public record SyncCruiseRoutePacket(int entityId, RouteStorageTarget target, Cru
                 if (vehicle instanceof com.g1739.immersiveaircraftcruise.cruise.CruiseVehicleAccess access) {
                     access.iacruise$setRoute(route.copy());
                 }
-                CruiseNetwork.CHANNEL.send(PacketDistributor.PLAYER.with(() -> player),
-                        new UpdateCruiseRoutePacket(vehicle.getId(), route.copy()));
+                CruiseController.syncRouteToPassengers(vehicle, route);
                 sendSavedMessage(packet, player);
             }
         });

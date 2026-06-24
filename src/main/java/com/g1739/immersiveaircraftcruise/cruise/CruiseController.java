@@ -108,6 +108,7 @@ public final class CruiseController {
     private static final Map<VehicleEntity, ItemStack> ACTIVE_MODULE = new WeakHashMap<>();
     private static final Map<VehicleEntity, String> ACTIVE_MODULE_ID = new WeakHashMap<>();
     private static final Map<VehicleEntity, ServerPlayer> LAST_PILOT = new WeakHashMap<>();
+    private static final Map<VehicleEntity, ServerPlayer> LAST_DISABLED_SYNC_PILOT = new WeakHashMap<>();
     private static final Map<VehicleEntity, Boolean> LANDING_ACTIVE = new WeakHashMap<>();
     private static final Map<VehicleEntity, Boolean> FAST_LANDING_FINAL_BRAKE_ACTIVE = new WeakHashMap<>();
     private static final Map<VehicleEntity, Boolean> AUTO_BRAKE_INPUT = new WeakHashMap<>();
@@ -163,6 +164,7 @@ public final class CruiseController {
         if (!CruiseModuleData.hasModule(vehicle)) {
             ACTIVE_MODULE.remove(vehicle);
             LAST_PILOT.remove(vehicle);
+            LAST_DISABLED_SYNC_PILOT.remove(vehicle);
             access.iacruise$getRoute().stopNavigation();
             access.iacruise$setBoosting(false);
             if (vehicle instanceof EngineVehicle engineVehicle) {
@@ -183,9 +185,14 @@ public final class CruiseController {
         }
 
         if (!route.isEnabled()) {
-            LAST_PILOT.remove(vehicle);
+            if (!clientSide) {
+                syncDisabledRouteToPilot(vehicle, route);
+            }
             stopNavigationEffects(vehicle, access);
             return;
+        }
+        if (!clientSide) {
+            LAST_DISABLED_SYNC_PILOT.remove(vehicle);
         }
 
         ServerPlayer pilot = controllingServerPlayer(vehicle);
@@ -255,6 +262,9 @@ public final class CruiseController {
                 return;
             }
         }
+        if (tickRotorcraftHoldingApproach(vehicle, access, route, waypoint, horizontalDistance)) {
+            return;
+        }
 
         int targetAltitude = navigationAltitude(route);
         double altitudeError = targetAltitude - vehicle.getY();
@@ -286,7 +296,15 @@ public final class CruiseController {
             return;
         }
         CruiseRoute route = serverRoute(vehicle, access);
-        if (!route.isEnabled() || route.isHoldingPattern()) {
+        if (route.isEnabled() && controllingServerPlayer(vehicle) == null) {
+            stopNavigation(vehicle, access, route, LAST_PILOT.remove(vehicle), false);
+            return;
+        }
+        if (!route.isEnabled()) {
+            syncDisabledRouteToPilot(vehicle, route);
+            return;
+        }
+        if (route.isHoldingPattern()) {
             return;
         }
         boolean changed = updateInitialAltitudeProgress(vehicle, route);
@@ -393,21 +411,16 @@ public final class CruiseController {
         }
         LANDING_ACTIVE.remove(vehicle);
         FAST_LANDING_FINAL_BRAKE_ACTIVE.remove(vehicle);
-        boolean rotorcraft = isVerticalAircraft(vehicle);
-        float turn = rotorcraft ? 0.0f : -1.0f;
-        float forward = rotorcraft ? 0.0f : 1.0f;
-        CruiseRoute.Waypoint finalTarget = route.getFinalTarget();
-        if (rotorcraft && finalTarget != null) {
-            Vec3 referencePosition = horizontalReferencePosition(vehicle);
-            double dx = finalTarget.x() + 0.5 - referencePosition.x;
-            double dz = finalTarget.z() + 0.5 - referencePosition.z;
-            double horizontalDistance = Math.sqrt(dx * dx + dz * dz);
-            if (horizontalDistance > VERTICAL_AIRCRAFT_LANDING_HORIZONTAL_RADIUS) {
-                float yawError = yawError(vehicle.getYRot(), dx, dz);
-                turn = fastLandingTurnInput(vehicle, yawError, horizontalDistance);
-                forward = 0.4f;
+        if (isVerticalAircraft(vehicle)) {
+            CruiseRoute.Waypoint finalTarget = route.getFinalTarget();
+            if (finalTarget != null) {
+                tickRotorcraftHoverControl(vehicle, finalTarget.x() + 0.5, finalTarget.z() + 0.5,
+                        route.getFinalFlightAltitude() - vehicle.getY(), false);
+                return;
             }
         }
+        float turn = -1.0f;
+        float forward = 1.0f;
         double altitudeError = route.getFinalAltitude() - vehicle.getY();
         float climbInput = altitudeInput(vehicle, altitudeError);
         if (vehicle instanceof AirplaneEntity) {
@@ -487,13 +500,14 @@ public final class CruiseController {
     private static boolean tickLandingApproach(VehicleEntity vehicle, CruiseVehicleAccess access, CruiseRoute route, CruiseRoute.Waypoint waypoint,
                                                double horizontalDistance, double dx, double dz, CruiseRoute.LandingMode landingMode, boolean clientSide) {
         if (landingMode == CruiseRoute.LandingMode.VERTICAL) {
-            if (isVerticalAircraft(vehicle)) {
-                Vec3 referencePosition = horizontalReferencePosition(vehicle);
-                dx = waypoint.x() + 0.5 - referencePosition.x;
-                dz = waypoint.z() + 0.5 - referencePosition.z;
-                horizontalDistance = Math.sqrt(dx * dx + dz * dz);
+            if (!isVerticalAircraft(vehicle)) {
+                return tickFastestLanding(vehicle, access, route, waypoint, horizontalDistance, dx, dz, clientSide);
             }
-            if (tickVerticalLanding(vehicle, access, route, waypoint, horizontalDistance, dx, dz, clientSide)) {
+            Vec3 referencePosition = horizontalReferencePosition(vehicle);
+            dx = waypoint.x() + 0.5 - referencePosition.x;
+            dz = waypoint.z() + 0.5 - referencePosition.z;
+            horizontalDistance = Math.sqrt(dx * dx + dz * dz);
+            if (tickVerticalLanding(vehicle, access, route, waypoint, horizontalDistance, clientSide)) {
                 return true;
             }
             return false;
@@ -502,32 +516,44 @@ public final class CruiseController {
     }
 
     private static boolean tickVerticalLanding(VehicleEntity vehicle, CruiseVehicleAccess access, CruiseRoute route, CruiseRoute.Waypoint waypoint,
-                                               double horizontalDistance, double dx, double dz, boolean clientSide) {
+                                               double horizontalDistance, boolean clientSide) {
+        return tickRotorcraftVerticalLanding(vehicle, access, route, waypoint, horizontalDistance, clientSide);
+    }
+
+    private static boolean tickRotorcraftHoldingApproach(VehicleEntity vehicle, CruiseVehicleAccess access, CruiseRoute route,
+                                                         CruiseRoute.Waypoint waypoint, double horizontalDistance) {
+        if (!isVerticalAircraft(vehicle)
+                || !route.isFinalTarget()
+                || route.getEffectiveLandingMode() != CruiseRoute.LandingMode.HOLDING_PATTERN
+                || horizontalDistance > WAYPOINT_RADIUS) {
+            return false;
+        }
+        setBoosting(vehicle, access, false);
+        tickRotorcraftHoverControl(vehicle, waypoint.x() + 0.5, waypoint.z() + 0.5,
+                route.getFinalFlightAltitude() - vehicle.getY(), false);
+        return true;
+    }
+
+    private static boolean tickRotorcraftVerticalLanding(VehicleEntity vehicle, CruiseVehicleAccess access, CruiseRoute route,
+                                                        CruiseRoute.Waypoint waypoint, double horizontalDistance,
+                                                        boolean clientSide) {
         if (horizontalDistance > WAYPOINT_RADIUS && !LANDING_ACTIVE.containsKey(vehicle)) {
             return false;
         }
-        LANDING_ACTIVE.put(vehicle, true);
         setBoosting(vehicle, access, false);
-
-        double altitudeError = landingAltitudeError(vehicle, route.getFinalAltitude());
-        if (isVerticalAircraft(vehicle)) {
-            float yawError = yawError(vehicle.getYRot(), dx, dz);
-            float turn = horizontalDistance > VERTICAL_AIRCRAFT_LANDING_HORIZONTAL_RADIUS
-                    ? fastLandingTurnInput(vehicle, yawError, horizontalDistance)
-                    : 0.0f;
-            float climbInput = altitudeInput(vehicle, altitudeError);
-            setCruiseInputs(vehicle, turn, climbInput, horizontalDistance > VERTICAL_AIRCRAFT_LANDING_HORIZONTAL_RADIUS ? 0.4f : 0.0f);
-            vehicle.setDeltaMovement(brakedVelocity(vehicle, 0.90d));
-            if (vehicle instanceof EngineVehicle engineVehicle && engineVehicle.getEngineTarget() < 1.0f) {
-                engineVehicle.setEngineTarget(1.0f);
-            }
-        } else {
-            tickCirclingDescent(vehicle, route, altitudeError);
+        boolean aligned = horizontalDistance <= VERTICAL_AIRCRAFT_LANDING_HORIZONTAL_RADIUS
+                && horizontalSpeed(vehicle) <= LANDING_VERTICAL_STOP_SPEED;
+        if (!LANDING_ACTIVE.containsKey(vehicle) && !aligned) {
+            tickRotorcraftHoverControl(vehicle, waypoint.x() + 0.5, waypoint.z() + 0.5,
+                    route.getFinalFlightAltitude() - vehicle.getY(), false);
+            return true;
         }
 
-        double radius = isVerticalAircraft(vehicle) ? VERTICAL_AIRCRAFT_LANDING_HORIZONTAL_RADIUS : WAYPOINT_RADIUS;
-        if (isLandingComplete(vehicle, waypoint, route.getFinalAltitude(), radius, LANDING_ALTITUDE_RADIUS,
-                isVerticalAircraft(vehicle) ? LANDING_VERTICAL_STOP_SPEED : 0.35d)) {
+        LANDING_ACTIVE.put(vehicle, true);
+        tickRotorcraftHoverControl(vehicle, waypoint.x() + 0.5, waypoint.z() + 0.5,
+                landingAltitudeError(vehicle, route.getFinalAltitude()), true);
+        if (isLandingComplete(vehicle, waypoint, route.getFinalAltitude(), VERTICAL_AIRCRAFT_LANDING_HORIZONTAL_RADIUS,
+                LANDING_ALTITUDE_RADIUS, LANDING_VERTICAL_STOP_SPEED)) {
             finishLanding(vehicle, access, route, clientSide);
         }
         return true;
@@ -877,6 +903,36 @@ public final class CruiseController {
             return Mth.clamp((float) (forwardError / 8.0d), -0.6f, 0.6f);
         }
         return horizontalDistance > VERTICAL_AIRCRAFT_LANDING_HORIZONTAL_RADIUS ? 1.0f : 0.0f;
+    }
+
+    private static void tickRotorcraftHoverControl(VehicleEntity vehicle, double targetX, double targetZ,
+                                                   double altitudeError, boolean preciseAltitude) {
+        Vec3 referencePosition = horizontalReferencePosition(vehicle);
+        double dx = targetX - referencePosition.x;
+        double dz = targetZ - referencePosition.z;
+        double horizontalDistance = Math.sqrt(dx * dx + dz * dz);
+        float yawError = yawError(vehicle.getYRot(), dx, dz);
+        boolean reversing = Math.abs(yawError) > ROTORCRAFT_FAST_LANDING_BACKWARD_YAW_LIMIT;
+        boolean aligned = horizontalDistance <= VERTICAL_AIRCRAFT_LANDING_HORIZONTAL_RADIUS
+                && horizontalSpeed(vehicle) <= LANDING_VERTICAL_STOP_SPEED;
+        float turn = horizontalDistance > FAST_LANDING_TURN_RADIUS
+                ? fastLandingTurnInput(vehicle, yawError, horizontalDistance)
+                : 0.0f;
+        float forwardInput = rotorcraftForwardInput(vehicle, dx, dz, horizontalDistance, true, reversing);
+        float verticalInput = preciseAltitude ? rotorcraftDescentInput(vehicle, altitudeError) : altitudeInput(vehicle, altitudeError);
+
+        setCruiseInputs(vehicle, reversing ? 0.0f : turn, verticalInput, aligned ? 0.0f : forwardInput);
+        if (!reversing && turn != 0.0f) {
+            vehicle.setYRot(vehicle.getYRot() - turn * 1.5f);
+        }
+        if (aligned) {
+            brakeRotorcraftHorizontalVelocity(vehicle);
+        } else {
+            vehicle.setDeltaMovement(brakedVelocity(vehicle, 0.94d));
+        }
+        if (vehicle instanceof EngineVehicle engineVehicle && engineVehicle.getEngineTarget() < 1.0f) {
+            engineVehicle.setEngineTarget(1.0f);
+        }
     }
 
     private static float rotorcraftDescentInput(VehicleEntity vehicle, double altitudeError) {
@@ -1745,6 +1801,11 @@ public final class CruiseController {
         vehicle.setInputs(movementX, movementY, movementZ);
     }
 
+    public static void clearCruiseInputs(VehicleEntity vehicle) {
+        AUTO_BRAKE_INPUT.remove(vehicle);
+        vehicle.setInputs(0.0f, 0.0f, 0.0f);
+    }
+
     private static void setBoosting(VehicleEntity vehicle, CruiseVehicleAccess access, boolean boosting) {
         setBoosting(vehicle, access, boosting, boosting ? 1.0f : 0.0f);
     }
@@ -1787,6 +1848,7 @@ public final class CruiseController {
                                        ServerPlayer messagePlayer, boolean clientSide) {
         route.stopNavigation();
         stopNavigationEffects(vehicle, access);
+        clearCruiseInputs(vehicle);
         if (!clientSide) {
             CruiseModuleData.write(vehicle, route);
             access.iacruise$setRoute(route.copy());
@@ -1921,13 +1983,31 @@ public final class CruiseController {
         return sign * Mth.clamp(magnitude / 18.0f, FAST_LANDING_MIN_TURN_INPUT, 1.0f);
     }
 
-    private static void syncRouteToClient(VehicleEntity vehicle, CruiseRoute route) {
+    public static void syncRouteToPassengers(VehicleEntity vehicle, CruiseRoute route) {
         for (Entity passenger : vehicle.getPassengers()) {
             if (passenger instanceof ServerPlayer player) {
                 CruiseNetwork.CHANNEL.send(PacketDistributor.PLAYER.with(() -> player),
                         new UpdateCruiseRoutePacket(vehicle.getId(), route.copy()));
             }
         }
+    }
+
+    private static void syncDisabledRouteToPilot(VehicleEntity vehicle, CruiseRoute route) {
+        ServerPlayer pilot = controllingServerPlayer(vehicle);
+        if (pilot == null) {
+            LAST_DISABLED_SYNC_PILOT.remove(vehicle);
+            return;
+        }
+        if (LAST_DISABLED_SYNC_PILOT.get(vehicle) == pilot) {
+            return;
+        }
+        CruiseNetwork.CHANNEL.send(PacketDistributor.PLAYER.with(() -> pilot),
+                new UpdateCruiseRoutePacket(vehicle.getId(), route.copy()));
+        LAST_DISABLED_SYNC_PILOT.put(vehicle, pilot);
+    }
+
+    private static void syncRouteToClient(VehicleEntity vehicle, CruiseRoute route) {
+        syncRouteToPassengers(vehicle, route);
     }
 
     private static void syncFuelInfo(VehicleEntity vehicle, EngineVehicle engineVehicle) {
@@ -1951,7 +2031,8 @@ public final class CruiseController {
         float consumption = Math.max(0.0f, engineVehicle.getFuelConsumption());
         int remainingTicks = consumption <= 0.0f ? -1 : clampTicks((storedFuel + display.pendingFuel()) / (double) consumption);
         float speed = hudSpeed(vehicle);
-        CruiseFuelInfo fuelInfo = new CruiseFuelInfo(display.amountText(), remainingTicks, icon, speed);
+        boolean boosting = engineVehicle instanceof CruiseVehicleAccess access && access.iacruise$isBoosting();
+        CruiseFuelInfo fuelInfo = new CruiseFuelInfo(display.amountText(), remainingTicks, icon, speed, boosting);
         for (Entity passenger : vehicle.getPassengers()) {
             if (passenger instanceof ServerPlayer player) {
                 awardSpeedAdvancement(player, speed);

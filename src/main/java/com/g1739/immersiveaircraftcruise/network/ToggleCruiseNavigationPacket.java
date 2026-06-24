@@ -107,8 +107,7 @@ public class ToggleCruiseNavigationPacket {
             if (vehicle instanceof com.g1739.immersiveaircraftcruise.cruise.CruiseVehicleAccess access) {
                 access.iacruise$setRoute(route.copy());
             }
-            CruiseNetwork.CHANNEL.send(PacketDistributor.PLAYER.with(() -> player),
-                    new UpdateCruiseRoutePacket(vehicle.getId(), route.copy()));
+            CruiseController.syncRouteToPassengers(vehicle, route);
         });
         context.setPacketHandled(true);
     }

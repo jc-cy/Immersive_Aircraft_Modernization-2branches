@@ -1,6 +1,8 @@
 package com.g1739.immersiveaircraftcruise.client;
 
 import com.g1739.immersiveaircraftcruise.ImmersiveAircraftCruise;
+import com.g1739.immersiveaircraftcruise.cruise.CruiseController;
+import com.g1739.immersiveaircraftcruise.cruise.CruiseRoute;
 import com.g1739.immersiveaircraftcruise.cruise.CruiseVehicleAccess;
 import com.g1739.immersiveaircraftcruise.network.CruiseNetwork;
 import com.g1739.immersiveaircraftcruise.network.RequestOpenCruiseScreenPacket;
@@ -108,26 +110,28 @@ public final class CruiseClient {
         }
 
         private static void sendStopPacket() {
-            StopCruiseNavigationPacket packet = stopPacket();
-            if (packet != null) {
-                CruiseNetwork.CHANNEL.sendToServer(packet);
-            }
-        }
-
-        private static StopCruiseNavigationPacket stopPacket() {
             Minecraft minecraft = Minecraft.getInstance();
             if (minecraft.player == null) {
-                return null;
+                return;
             }
             Entity root = minecraft.player.getRootVehicle();
             if (root instanceof VehicleEntity vehicle && vehicle instanceof CruiseVehicleAccess access) {
-                if (vehicle.getControllingPassenger() == minecraft.player
-                        && access.iacruise$getRoute().isEnabled()
-                        && access.iacruise$getRoute().hasAnyWaypoint()) {
-                    return new StopCruiseNavigationPacket(vehicle.getId(), access.iacruise$getRoute());
+                if (vehicle.getControllingPassenger() == minecraft.player) {
+                    CruiseRoute localRoute = access.iacruise$getRoute();
+                    CruiseNetwork.CHANNEL.sendToServer(new StopCruiseNavigationPacket(vehicle.getId(), localRoute));
+                    if (localRoute != null && localRoute.isEnabled()) {
+                        stopLocalNavigation(vehicle, access, localRoute);
+                    }
                 }
             }
-            return null;
+        }
+
+        private static void stopLocalNavigation(VehicleEntity vehicle, CruiseVehicleAccess access, CruiseRoute route) {
+            CruiseRoute stopped = route == null ? CruiseRoute.empty() : route.copy();
+            stopped.stopNavigation();
+            access.iacruise$setRoute(stopped);
+            CruiseController.stopNavigationEffects(vehicle);
+            CruiseController.clearCruiseInputs(vehicle);
         }
     }
 }

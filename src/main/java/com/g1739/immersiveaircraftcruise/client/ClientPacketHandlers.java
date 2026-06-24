@@ -1,6 +1,7 @@
 package com.g1739.immersiveaircraftcruise.client;
 
 import com.g1739.immersiveaircraftcruise.client.gui.CruiseScreen;
+import com.g1739.immersiveaircraftcruise.cruise.CruiseController;
 import com.g1739.immersiveaircraftcruise.cruise.CruiseFuelInfo;
 import com.g1739.immersiveaircraftcruise.cruise.CruiseRoute;
 import com.g1739.immersiveaircraftcruise.cruise.CruiseVehicleAccess;
@@ -34,7 +35,13 @@ public final class ClientPacketHandlers {
         }
         Entity entity = minecraft.level.getEntity(entityId);
         if (entity instanceof VehicleEntity && entity instanceof CruiseVehicleAccess access) {
-            access.iacruise$setRoute(route.copy());
+            CruiseRoute previous = access.iacruise$getRoute();
+            CruiseRoute synced = route.copy();
+            access.iacruise$setRoute(synced);
+            if (!synced.isEnabled() && previous != null && previous.isEnabled()) {
+                CruiseController.stopNavigationEffects((VehicleEntity) entity);
+                CruiseController.clearCruiseInputs((VehicleEntity) entity);
+            }
         }
         if (minecraft.screen instanceof CruiseScreen screen && screen.isForEntity(entityId)) {
             screen.updateRuntime(route);
