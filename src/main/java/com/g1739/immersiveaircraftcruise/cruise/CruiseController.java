@@ -79,6 +79,11 @@ public final class CruiseController {
     private static final int ROTORCRAFT_FAST_LANDING_VERTICAL_COAST_TICKS = 100;
     private static final double ROTORCRAFT_FAST_LANDING_COMPLETION_ALTITUDE_RADIUS = 3.0;
     private static final double FAST_LANDING_LATERAL_DEAD_ZONE = 0.5;
+    private static final float AIRPLANE_LANDING_PITCH_LIMIT = 85.0f;
+    private static final double AIRPLANE_GROUND_APPROACH_DEAD_ZONE = 0.25;
+    private static final double AIRPLANE_GROUND_APPROACH_CONTROL_RANGE = 4.0;
+    private static final double AIRPLANE_GROUND_APPROACH_SPEED_DAMPING = 2.4;
+    private static final float AIRPLANE_GROUND_APPROACH_MAX_INPUT = 0.55f;
     private static final float FAST_LANDING_YAW_DEAD_ZONE = 0.2f;
     private static final float FAST_LANDING_MIN_TURN_INPUT = 0.08f;
     private static final float FAST_DESCENT_AIRPLANE_PITCH = 1.0f;
@@ -607,7 +612,11 @@ public final class CruiseController {
         }
         if (vehicle instanceof AirplaneEntity) {
             float pitchInput = forceDescent ? FAST_DESCENT_AIRPLANE_PITCH : -climbInput;
-            setCruiseInputs(vehicle, turn, finalBrake ? -1.0f : 0.0f, pitchInput);
+            clampLandingPitch(vehicle);
+            float forwardInput = finalBrake && vehicle.onGround()
+                    ? airplaneGroundApproachInput(vehicle, dx, dz)
+                    : pitchInput;
+            setCruiseInputs(vehicle, turn, finalBrake ? -1.0f : 0.0f, forwardInput);
         } else {
             float verticalInput = forceDescent ? FAST_DESCENT_VERTICAL_INPUT : climbInput;
             float forwardInput = horizontalDistance > landingHorizontalRadius ? (activelyReducingSpeed ? 0.0f : 1.0f) : 0.0f;
@@ -903,6 +912,25 @@ public final class CruiseController {
             return Mth.clamp((float) (forwardError / 8.0d), -0.6f, 0.6f);
         }
         return horizontalDistance > VERTICAL_AIRCRAFT_LANDING_HORIZONTAL_RADIUS ? 1.0f : 0.0f;
+    }
+
+    private static float airplaneGroundApproachInput(VehicleEntity vehicle, double dx, double dz) {
+        Vec3 forward = forwardFromRotation(vehicle.getYRot(), 0.0d);
+        forward = new Vec3(forward.x, 0.0d, forward.z);
+        if (forward.lengthSqr() <= 1.0E-8d) {
+            return 0.0f;
+        }
+        forward = forward.normalize();
+        Vec3 velocity = vehicle.getDeltaMovement();
+        double forwardError = forward.x * dx + forward.z * dz;
+        double forwardSpeed = forward.x * velocity.x + forward.z * velocity.z;
+        if (Math.abs(forwardError) <= AIRPLANE_GROUND_APPROACH_DEAD_ZONE
+                && Math.abs(forwardSpeed) <= FAST_LANDING_GROUND_STOP_SPEED) {
+            return 0.0f;
+        }
+        double input = forwardError / AIRPLANE_GROUND_APPROACH_CONTROL_RANGE
+                - forwardSpeed * AIRPLANE_GROUND_APPROACH_SPEED_DAMPING;
+        return Mth.clamp((float) input, -AIRPLANE_GROUND_APPROACH_MAX_INPUT, AIRPLANE_GROUND_APPROACH_MAX_INPUT);
     }
 
     private static void tickRotorcraftHoverControl(VehicleEntity vehicle, double targetX, double targetZ,
@@ -1918,6 +1946,7 @@ public final class CruiseController {
     }
 
     public static void afterUpdateController(VehicleEntity vehicle) {
+        clampLandingPitch(vehicle);
         if (!(vehicle instanceof EngineVehicle engineVehicle) || !usesControlledBoost(engineVehicle)) {
             CONTROLLER_VELOCITY_BEFORE.remove(vehicle);
             return;
@@ -1941,6 +1970,15 @@ public final class CruiseController {
             return;
         }
         vehicle.setDeltaMovement(after.add(controllerDelta.scale(powerBonus)));
+    }
+
+    public static void clampLandingPitch(VehicleEntity vehicle) {
+        if (vehicle instanceof AirplaneEntity
+                && (LANDING_ACTIVE.containsKey(vehicle)
+                || FAST_LANDING_FINAL_BRAKE_ACTIVE.containsKey(vehicle)
+                || POST_LANDING_BRAKE.containsKey(vehicle))) {
+            vehicle.setXRot(Mth.clamp(vehicle.getXRot(), -AIRPLANE_LANDING_PITCH_LIMIT, AIRPLANE_LANDING_PITCH_LIMIT));
+        }
     }
 
     private static float yawError(float currentYaw, double dx, double dz) {
