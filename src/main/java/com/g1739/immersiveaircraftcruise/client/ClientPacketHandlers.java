@@ -54,20 +54,10 @@ public final class ClientPacketHandlers {
         if (minecraft.level != null) {
             Entity entity = minecraft.level.getEntity(entityId);
             if (entity instanceof VehicleEntity vehicle) {
-                CruiseModuleData.setBoosting(vehicle, isBoosting(vehicle, fuelInfo));
+                CruiseModuleData.setBoosting(vehicle, fuelInfo.boosting());
             }
         }
         CruiseHud.setFuelInfo(entityId, fuelInfo);
-    }
-
-    private static boolean isBoosting(VehicleEntity vehicle, CruiseFuelInfo fuelInfo) {
-        return fuelInfo.boosting()
-                || isLocalPilot(vehicle) && vehicle instanceof CruiseVehicleAccess access && access.iacruise$isBoosting();
-    }
-
-    private static boolean isLocalPilot(VehicleEntity vehicle) {
-        Minecraft minecraft = Minecraft.getInstance();
-        return minecraft.player != null && vehicle.getControllingPassenger() == minecraft.player;
     }
 
     public static void updateVehicleInventory(int entityId, List<SyncVehicleInventoryPacket.Entry> entries) {

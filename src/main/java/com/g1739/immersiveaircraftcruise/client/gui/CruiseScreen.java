@@ -859,8 +859,8 @@ public class CruiseScreen extends Screen {
             return;
         }
         Entity entity = minecraft.level.getEntity(entityId);
-        if (entity instanceof VehicleEntity vehicle && entity instanceof CruiseVehicleAccess access) {
-            CruiseHud.renderHud(graphics, font, vehicle, access, previewRoute, width, height);
+        if (entity instanceof VehicleEntity vehicle && entity instanceof CruiseVehicleAccess) {
+            CruiseHud.renderHud(graphics, font, vehicle, previewRoute, width, height);
             int x = CruiseHud.x(width);
             int y = CruiseHud.y(height);
             graphics.renderOutline(x - 2, y - 2, CruiseHud.width() + 4, CruiseHud.height() + 4, 0xFFFFFFFF);

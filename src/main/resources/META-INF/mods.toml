@@ -16,10 +16,12 @@ description = '''
 超频巡导模块可安装到沉浸飞机升级槽；玩家可在飞机上打开航线设置，也可手持模块右键编辑同一份模块 NBT 数据。
 
 0.2.0 更新概括：
+- 新增2个成就。
 - 新增普通模式+20%动力、节能模式-15%动力-75%燃料消耗，可按航线独立保存。
 - 优化航线设置界面，运行信息显示，如界面顶部显示当前航线与下一站，信息UI可显示当前航线名。
 - 打开航线设置界面不再暂停游戏，清空航线增加二次确认。
 - 多人模式下，飞机上模块的打开、保存、HUD 切换和导航启停只允许驾驶位玩家操作，乘客不会影响飞机模块。
+- 修复和优化若干bug.
 
 Chinese Notice
 本模组采用 ARR 协议。仅允许作者未修改发布版免费用于个人、非商业、合法的正常游戏使用。
@@ -31,10 +33,12 @@ Adds a modern overclocked cruise guidance module for Immersive Aircraft.
 Features include multi-route editing, named waypoints, default and per-waypoint flight altitude, HUD information display, item and liquid fuel remaining display, auto navigation, pause/resume navigation, overclock cruise acceleration, and endpoint modes such as holding pattern, normal landing, and vertical landing.
 
 0.2.0 Update Summary:
-- Added Normal Mode with +20% power and Eco Mode with -15% power and -75% fuel consumption; each route saves its own mode.
+- Added 2 advancements.
+- Added Normal Mode with +20% power and Eco Mode with -15% power and -75% fuel consumption; each route saves its own mode independently.
 - Improved the route setup screen and runtime information display, including current route and next stop in the screen header, plus the current route name in the info HUD.
-- Opening the route setup screen no longer pauses the game, and clearing a route now requires confirmation.
+- Opening the route setup screen no longer pauses the game, and clearing a route now requires a second confirmation.
 - In multiplayer, opening and saving aircraft module routes, toggling the HUD, and starting or stopping navigation are only allowed for the pilot seat player; passengers cannot affect aircraft modules.
+- Fixed and optimized several bugs.
 
 English Notice
 Distributed under ARR.

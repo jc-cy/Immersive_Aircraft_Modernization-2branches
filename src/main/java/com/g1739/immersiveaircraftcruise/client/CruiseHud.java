@@ -44,19 +44,17 @@ public final class CruiseHud {
             return;
         }
 
-        renderHud(graphics, minecraft.font, vehicle, access, route, screenWidth, screenHeight);
+        renderHud(graphics, minecraft.font, vehicle, route, screenWidth, screenHeight);
     }
 
-    public static void renderHud(GuiGraphics graphics, Font font, VehicleEntity vehicle, CruiseVehicleAccess access,
+    public static void renderHud(GuiGraphics graphics, Font font, VehicleEntity vehicle,
                                  CruiseRoute route, int screenWidth, int screenHeight) {
-        renderHudAt(graphics, font, vehicle, access, route, x(screenWidth), y(screenHeight));
+        renderHudAt(graphics, font, vehicle, route, x(screenWidth), y(screenHeight));
     }
 
-    public static void renderHudAt(GuiGraphics graphics, Font font, VehicleEntity vehicle, CruiseVehicleAccess access,
-                                   CruiseRoute route, int x, int y) {
+    public static void renderHudAt(GuiGraphics graphics, Font font, VehicleEntity vehicle, CruiseRoute route, int x, int y) {
         CruiseFuelInfo fuelInfo = FUEL_INFO.getOrDefault(vehicle.getId(), CruiseFuelInfo.EMPTY);
-        boolean localPilotBoosting = isLocalPilot(vehicle) && access.iacruise$isBoosting();
-        renderHudAt(graphics, font, vehicle, localPilotBoosting || fuelInfo.boosting(), route, x, y);
+        renderHudAt(graphics, font, vehicle, fuelInfo.boosting(), route, x, y);
     }
 
     public static void renderHudAt(GuiGraphics graphics, Font font, VehicleEntity vehicle, boolean boosting,
@@ -147,8 +145,7 @@ public final class CruiseHud {
     }
 
     private static double displaySpeed(VehicleEntity vehicle, CruiseFuelInfo fuelInfo) {
-        double localSpeed = vehicle.getDeltaMovement().length() * 20.0d;
-        return localSpeed > 0.05d ? localSpeed : fuelInfo.speed();
+        return fuelInfo.speed();
     }
 
     private static String formatPoint(CruiseRoute.Waypoint waypoint) {
@@ -190,8 +187,4 @@ public final class CruiseHud {
         FUEL_INFO.put(entityId, fuelInfo);
     }
 
-    private static boolean isLocalPilot(VehicleEntity vehicle) {
-        Minecraft minecraft = Minecraft.getInstance();
-        return minecraft.player != null && vehicle.getControllingPassenger() == minecraft.player;
-    }
 }

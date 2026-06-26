@@ -5,7 +5,6 @@ import com.g1739.immersiveaircraftcruise.cruise.CruiseModuleData;
 import com.g1739.immersiveaircraftcruise.cruise.CruiseRoute;
 import com.g1739.immersiveaircraftcruise.cruise.CruiseVehicleAccess;
 import immersive_aircraft.entity.VehicleEntity;
-import net.minecraft.world.entity.player.Player;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Shadow;
 import org.spongepowered.asm.mixin.Unique;
@@ -43,14 +42,9 @@ public abstract class VehicleEntityMixin implements CruiseVehicleAccess {
     public void iacruise$setBoosting(boolean boosting) {
         immersive_aircraft_cruise$boosting = boosting;
         VehicleEntity vehicle = (VehicleEntity) (Object) this;
-        if (!vehicle.level().isClientSide() || immersive_aircraft_cruise$isLocalPilot(vehicle)) {
+        if (!vehicle.level().isClientSide()) {
             CruiseModuleData.setBoosting(vehicle, boosting);
         }
-    }
-
-    @Unique
-    private static boolean immersive_aircraft_cruise$isLocalPilot(VehicleEntity vehicle) {
-        return vehicle.getControllingPassenger() instanceof Player player && player.isLocalPlayer();
     }
 
     @Inject(method = {"tick", "m_8119_"}, at = @At(value = "INVOKE", target = "Limmersive_aircraft/entity/VehicleEntity;updateVelocity()V"), remap = false)

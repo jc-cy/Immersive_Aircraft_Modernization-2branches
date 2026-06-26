@@ -104,6 +104,7 @@ public final class CruiseController {
     private static final float ALTITUDE_SMOOTHING = 0.18f;
     private static final float BOOST_RISE_PER_TICK = 0.08f;
     private static final float BOOST_FALL_PER_TICK = 0.06f;
+    private static final int HUD_SYNC_INTERVAL_TICKS = 5;
     private static final double HUD_SPEED_MAX = 512.0d;
     private static final float SPEED_ADVANCEMENT_THRESHOLD = 117.0f;
     private static final ResourceLocation SPEED_ADVANCEMENT_ID = new ResourceLocation(ImmersiveAircraftCruise.MOD_ID, "speed_117");
@@ -312,6 +313,7 @@ public final class CruiseController {
             return;
         }
         if (route.isHoldingPattern()) {
+            setBoosting(vehicle, access, false);
             return;
         }
         boolean changed = updateInitialAltitudeProgress(vehicle, route);
@@ -322,6 +324,7 @@ public final class CruiseController {
             CruiseModuleData.write(vehicle, route);
             syncRouteToClient(vehicle, route);
         }
+        updateServerBoostingState(vehicle, access, route);
     }
 
     public static void stopNavigationEffects(VehicleEntity vehicle) {
@@ -1809,6 +1812,27 @@ public final class CruiseController {
         return yaw <= BOOST_ENTER_YAW && altitude <= BOOST_ENTER_ALTITUDE;
     }
 
+    private static void updateServerBoostingState(VehicleEntity vehicle, CruiseVehicleAccess access, CruiseRoute route) {
+        if (vehicle.level().isClientSide()) {
+            return;
+        }
+        if (!route.isEnabled() || route.isHoldingPattern() || !route.hasTarget()) {
+            setBoosting(vehicle, access, false);
+            return;
+        }
+        if (route.isFinalTarget() && route.getEffectiveLandingMode() == CruiseRoute.LandingMode.VERTICAL) {
+            setBoosting(vehicle, access, false);
+            return;
+        }
+        CruiseRoute.Waypoint waypoint = route.getTarget();
+        Vec3 referencePosition = horizontalReferencePosition(vehicle);
+        double dx = waypoint.x() + 0.5 - referencePosition.x;
+        double dz = waypoint.z() + 0.5 - referencePosition.z;
+        double altitudeError = navigationAltitude(route) - vehicle.getY();
+        float yawError = yawError(vehicle.getYRot(), dx, dz);
+        setBoosting(vehicle, access, shouldBoost(access, yawError, altitudeError, isAwayFromFinal(vehicle, route)));
+    }
+
     private static float altitudeInput(VehicleEntity vehicle, double altitudeError) {
         double verticalSpeed = vehicle.getDeltaMovement().y;
         float targetInput = simulatedAltitudeInput(altitudeError, verticalSpeed);
@@ -2060,7 +2084,7 @@ public final class CruiseController {
     }
 
     private static void syncFuelInfo(VehicleEntity vehicle, EngineVehicle engineVehicle) {
-        if (vehicle.tickCount % 20 != 0) {
+        if (vehicle.tickCount % HUD_SYNC_INTERVAL_TICKS != 0) {
             return;
         }
         List<SlotDescription> slots = engineVehicle.getInventoryDescription().getSlots(VehicleInventoryDescription.BOILER);
