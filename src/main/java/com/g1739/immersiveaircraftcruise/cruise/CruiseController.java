@@ -3,6 +3,7 @@ package com.g1739.immersiveaircraftcruise.cruise;
 import com.g1739.immersiveaircraftcruise.ImmersiveAircraftCruise;
 import com.g1739.immersiveaircraftcruise.mixin.EngineVehicleAccessor;
 import com.g1739.immersiveaircraftcruise.network.CruiseNetwork;
+import com.g1739.immersiveaircraftcruise.network.StopCruiseNavigationPacket;
 import com.g1739.immersiveaircraftcruise.network.UpdateCruiseFuelPacket;
 import com.g1739.immersiveaircraftcruise.network.UpdateCruiseRoutePacket;
 import immersive_aircraft.entity.AirplaneEntity;
@@ -21,6 +22,7 @@ import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.util.Mth;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.LivingEntity;
+import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.phys.Vec3;
 import net.minecraftforge.common.capabilities.ForgeCapabilities;
@@ -790,6 +792,15 @@ public final class CruiseController {
         LANDING_ACTIVE.remove(vehicle);
         POST_LANDING_BRAKE.remove(vehicle);
         stopNavigation(vehicle, access, route, controllingServerPlayer(vehicle), clientSide);
+        if (clientSide) {
+            syncFinishedNavigationToServer(vehicle, route);
+        }
+    }
+
+    private static void syncFinishedNavigationToServer(VehicleEntity vehicle, CruiseRoute route) {
+        if (vehicle.getControllingPassenger() instanceof Player player && player.isLocalPlayer()) {
+            CruiseNetwork.CHANNEL.sendToServer(new StopCruiseNavigationPacket(vehicle.getId(), route));
+        }
     }
 
     private static double brakingDecay(VehicleEntity vehicle) {

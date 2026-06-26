@@ -55,8 +55,8 @@ public final class CruiseHud {
     public static void renderHudAt(GuiGraphics graphics, Font font, VehicleEntity vehicle, CruiseVehicleAccess access,
                                    CruiseRoute route, int x, int y) {
         CruiseFuelInfo fuelInfo = FUEL_INFO.getOrDefault(vehicle.getId(), CruiseFuelInfo.EMPTY);
-        boolean boosting = FUEL_INFO.containsKey(vehicle.getId()) ? fuelInfo.boosting() : access.iacruise$isBoosting();
-        renderHudAt(graphics, font, vehicle, boosting, route, x, y);
+        boolean localPilotBoosting = isLocalPilot(vehicle) && access.iacruise$isBoosting();
+        renderHudAt(graphics, font, vehicle, localPilotBoosting || fuelInfo.boosting(), route, x, y);
     }
 
     public static void renderHudAt(GuiGraphics graphics, Font font, VehicleEntity vehicle, boolean boosting,
@@ -188,5 +188,10 @@ public final class CruiseHud {
 
     public static void setFuelInfo(int entityId, CruiseFuelInfo fuelInfo) {
         FUEL_INFO.put(entityId, fuelInfo);
+    }
+
+    private static boolean isLocalPilot(VehicleEntity vehicle) {
+        Minecraft minecraft = Minecraft.getInstance();
+        return minecraft.player != null && vehicle.getControllingPassenger() == minecraft.player;
     }
 }

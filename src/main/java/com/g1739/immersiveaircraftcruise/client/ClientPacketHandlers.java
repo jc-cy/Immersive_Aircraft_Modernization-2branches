@@ -3,6 +3,7 @@ package com.g1739.immersiveaircraftcruise.client;
 import com.g1739.immersiveaircraftcruise.client.gui.CruiseScreen;
 import com.g1739.immersiveaircraftcruise.cruise.CruiseController;
 import com.g1739.immersiveaircraftcruise.cruise.CruiseFuelInfo;
+import com.g1739.immersiveaircraftcruise.cruise.CruiseModuleData;
 import com.g1739.immersiveaircraftcruise.cruise.CruiseRoute;
 import com.g1739.immersiveaircraftcruise.cruise.CruiseVehicleAccess;
 import com.g1739.immersiveaircraftcruise.network.SyncVehicleInventoryPacket;
@@ -49,7 +50,24 @@ public final class ClientPacketHandlers {
     }
 
     public static void updateCruiseFuel(int entityId, CruiseFuelInfo fuelInfo) {
+        Minecraft minecraft = Minecraft.getInstance();
+        if (minecraft.level != null) {
+            Entity entity = minecraft.level.getEntity(entityId);
+            if (entity instanceof VehicleEntity vehicle) {
+                CruiseModuleData.setBoosting(vehicle, isBoosting(vehicle, fuelInfo));
+            }
+        }
         CruiseHud.setFuelInfo(entityId, fuelInfo);
+    }
+
+    private static boolean isBoosting(VehicleEntity vehicle, CruiseFuelInfo fuelInfo) {
+        return fuelInfo.boosting()
+                || isLocalPilot(vehicle) && vehicle instanceof CruiseVehicleAccess access && access.iacruise$isBoosting();
+    }
+
+    private static boolean isLocalPilot(VehicleEntity vehicle) {
+        Minecraft minecraft = Minecraft.getInstance();
+        return minecraft.player != null && vehicle.getControllingPassenger() == minecraft.player;
     }
 
     public static void updateVehicleInventory(int entityId, List<SyncVehicleInventoryPacket.Entry> entries) {

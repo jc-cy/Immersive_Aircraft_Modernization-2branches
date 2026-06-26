@@ -54,6 +54,7 @@
   "message.immersive_aircraft_cruise.hud_enabled": "Info display enabled.",
   "message.immersive_aircraft_cruise.hud_disabled": "Info display disabled.",
   "message.immersive_aircraft_cruise.no_route": "Set at least one cruise waypoint first.",
+  "message.immersive_aircraft_cruise.route_finished": "Navigation has ended. Please set a new route.",
   "message.immersive_aircraft_cruise.disabled_brake": "Auto navigation exited.",
   "tooltip.immersive_aircraft_cruise.category": "Overclock Module",
   "tooltip.immersive_aircraft_cruise.cruise_module_quote": "Top-tier technology beyond all limits.",

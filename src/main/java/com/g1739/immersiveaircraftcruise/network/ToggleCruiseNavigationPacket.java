@@ -91,6 +91,10 @@ public class ToggleCruiseNavigationPacket {
                 return;
             }
             packet.mergeClientProgress(vehicle, route);
+            if (route.isNavigationFinished()) {
+                player.displayClientMessage(Component.translatable("message.immersive_aircraft_cruise.route_finished"), true);
+                return;
+            }
 
             if (route.isEnabled()) {
                 CruiseController.stopNavigation(vehicle, route, player);
@@ -124,6 +128,9 @@ public class ToggleCruiseNavigationPacket {
     }
 
     private void mergeClientProgress(VehicleEntity vehicle, CruiseRoute route) {
+        if (route.isNavigationFinished()) {
+            return;
+        }
         if (entityId != vehicle.getId() || selectedRoute != route.getSelectedRoute()) {
             return;
         }

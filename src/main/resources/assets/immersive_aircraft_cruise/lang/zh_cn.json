@@ -54,6 +54,7 @@
   "message.immersive_aircraft_cruise.hud_enabled": "信息显示已开启。",
   "message.immersive_aircraft_cruise.hud_disabled": "信息显示已关闭。",
   "message.immersive_aircraft_cruise.no_route": "请先设置至少一个巡航航点。",
+  "message.immersive_aircraft_cruise.route_finished": "导航已结束请重新设定航线。",
   "message.immersive_aircraft_cruise.disabled_brake": "自动导航已退出。",
   "tooltip.immersive_aircraft_cruise.category": "超频模块",
   "tooltip.immersive_aircraft_cruise.cruise_module_quote": "超越极限的顶级科技。",

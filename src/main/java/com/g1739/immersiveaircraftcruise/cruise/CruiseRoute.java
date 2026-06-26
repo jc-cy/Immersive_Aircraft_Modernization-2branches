@@ -291,6 +291,14 @@ public class CruiseRoute {
         return hasTarget() && currentIndex == getSelectedEntry().waypoints().size() - 1;
     }
 
+    public boolean isNavigationFinished() {
+        List<Waypoint> waypoints = getSelectedEntry().waypoints();
+        return !waypoints.isEmpty()
+                && !enabled
+                && holdingPattern
+                && currentIndex >= waypoints.size() - 1;
+    }
+
     public LandingMode getLandingMode() {
         return getSelectedEntry().landingMode();
     }
