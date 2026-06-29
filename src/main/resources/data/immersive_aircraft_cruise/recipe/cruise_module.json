@@ -1,0 +1,25 @@
+{
+  "type": "minecraft:crafting_shaped",
+  "pattern": [
+    " E ",
+    "PGP",
+    " N "
+  ],
+  "key": {
+    "E": {
+      "item": "immersive_aircraft:eco_engine"
+    },
+    "G": {
+      "item": "immersive_aircraft:gyroscope"
+    },
+    "N": {
+      "item": "immersive_aircraft:nether_engine"
+    },
+    "P": {
+      "item": "immersive_aircraft:sturdy_pipes"
+    }
+  },
+  "result": {
+    "id": "immersive_aircraft_cruise:cruise_module"
+  }
+}

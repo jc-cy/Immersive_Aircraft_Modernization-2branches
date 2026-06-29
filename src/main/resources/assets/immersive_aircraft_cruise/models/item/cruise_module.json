@@ -1,0 +1,14 @@
+{
+  "parent": "item/generated",
+  "textures": {
+    "layer0": "immersive_aircraft_cruise:item/cruise_module"
+  },
+  "overrides": [
+    {
+      "predicate": {
+        "immersive_aircraft_cruise:boosting": 1.0
+      },
+      "model": "immersive_aircraft_cruise:item/cruise_module_boost"
+    }
+  ]
+}

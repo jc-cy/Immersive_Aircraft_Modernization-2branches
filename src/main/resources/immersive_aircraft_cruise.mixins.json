@@ -1,0 +1,15 @@
+{
+  "required": true,
+  "minVersion": "0.8",
+  "package": "com.g1739.immersiveaircraftcruise.mixin",
+  "compatibilityLevel": "JAVA_21",
+  "refmap": "immersive_aircraft_cruise.refmap.json",
+  "mixins": [
+    "EngineVehicleMixin",
+    "EngineVehicleAccessor",
+    "VehicleEntityMixin"
+  ],
+  "injectors": {
+    "defaultRequire": 1
+  }
+}
