@@ -444,10 +444,13 @@ public class CruiseRoute {
         int currentIndex = buffer.readInt();
         Waypoint startPoint = buffer.readBoolean() ? Waypoint.read(buffer) : null;
         boolean initialAltitudeReached = buffer.readBoolean();
-        int size = Math.min(buffer.readInt(), MAX_ROUTES);
-        List<RouteEntry> routes = new ArrayList<>(size);
+        int size = buffer.readInt();
+        List<RouteEntry> routes = new ArrayList<>(Math.min(Math.max(size, 0), MAX_ROUTES));
         for (int i = 0; i < size; i++) {
-            routes.add(RouteEntry.read(buffer));
+            RouteEntry route = RouteEntry.read(buffer);
+            if (i < MAX_ROUTES) {
+                routes.add(route);
+            }
         }
         return new CruiseRoute(enabled, holdingPattern, hudEnabled, selectedRoute, currentIndex, startPoint, initialAltitudeReached, routes);
     }
@@ -646,10 +649,13 @@ public class CruiseRoute {
             CruiseMode cruiseMode = CruiseMode.byId(buffer.readInt());
             LandingMode landingMode = LandingMode.byId(buffer.readInt());
             Integer landingAltitude = buffer.readBoolean() ? buffer.readInt() : null;
-            int size = Math.min(buffer.readInt(), MAX_WAYPOINTS);
-            List<Waypoint> waypoints = new ArrayList<>(size);
+            int size = buffer.readInt();
+            List<Waypoint> waypoints = new ArrayList<>(Math.min(Math.max(size, 0), MAX_WAYPOINTS));
             for (int i = 0; i < size; i++) {
-                waypoints.add(Waypoint.read(buffer));
+                Waypoint waypoint = Waypoint.read(buffer);
+                if (i < MAX_WAYPOINTS) {
+                    waypoints.add(waypoint);
+                }
             }
             return new RouteEntry(name, defaultAltitude, cruiseMode, landingMode, landingAltitude, waypoints);
         }

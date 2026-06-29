@@ -4,6 +4,7 @@ import com.g1739.immersiveaircraftcruise.ImmersiveAircraftCruise;
 import com.g1739.immersiveaircraftcruise.mixin.EngineVehicleAccessor;
 import com.g1739.immersiveaircraftcruise.network.CruiseNetwork;
 import com.g1739.immersiveaircraftcruise.network.StopCruiseNavigationPacket;
+import com.g1739.immersiveaircraftcruise.network.UpdateCruiseBoostPacket;
 import com.g1739.immersiveaircraftcruise.network.UpdateCruiseFuelPacket;
 import com.g1739.immersiveaircraftcruise.network.UpdateCruiseRoutePacket;
 import immersive_aircraft.entity.AirplaneEntity;
@@ -105,12 +106,15 @@ public final class CruiseController {
     private static final float BOOST_RISE_PER_TICK = 0.08f;
     private static final float BOOST_FALL_PER_TICK = 0.06f;
     private static final int HUD_SYNC_INTERVAL_TICKS = 5;
+    private static final int BOOST_SYNC_INTERVAL_TICKS = 5;
+    private static final int BOOST_SYNC_LEVEL_STEPS = 20;
     private static final double HUD_SPEED_MAX = 512.0d;
     private static final float SPEED_ADVANCEMENT_THRESHOLD = 117.0f;
     private static final ResourceLocation SPEED_ADVANCEMENT_ID = new ResourceLocation(ImmersiveAircraftCruise.MOD_ID, "speed_117");
     private static final Map<VehicleEntity, Float> TURN_MEMORY = new WeakHashMap<>();
     private static final Map<VehicleEntity, Float> ALTITUDE_MEMORY = new WeakHashMap<>();
     private static final Map<EngineVehicle, Float> BOOST_LEVEL = new WeakHashMap<>();
+    private static final Map<EngineVehicle, Float> BOOST_TARGET_LEVEL = new WeakHashMap<>();
     private static final Map<VehicleEntity, Vec3> CONTROLLER_VELOCITY_BEFORE = new WeakHashMap<>();
     private static final Map<VehicleEntity, SpeedSample> HUD_SPEED_SAMPLES = new WeakHashMap<>();
     private static final Map<VehicleEntity, ItemStack> ACTIVE_MODULE = new WeakHashMap<>();
@@ -121,6 +125,7 @@ public final class CruiseController {
     private static final Map<VehicleEntity, Boolean> FAST_LANDING_FINAL_BRAKE_ACTIVE = new WeakHashMap<>();
     private static final Map<VehicleEntity, Boolean> AUTO_BRAKE_INPUT = new WeakHashMap<>();
     private static final Map<VehicleEntity, Integer> POST_LANDING_BRAKE = new WeakHashMap<>();
+    private static final Map<VehicleEntity, BoostSyncState> LAST_CLIENT_BOOST_SYNC = new WeakHashMap<>();
 
     private CruiseController() {
     }
@@ -177,6 +182,7 @@ public final class CruiseController {
             access.iacruise$setBoosting(false);
             if (vehicle instanceof EngineVehicle engineVehicle) {
                 BOOST_LEVEL.remove(engineVehicle);
+                BOOST_TARGET_LEVEL.remove(engineVehicle);
             }
             TURN_MEMORY.remove(vehicle);
             ALTITUDE_MEMORY.remove(vehicle);
@@ -184,6 +190,7 @@ public final class CruiseController {
             FAST_LANDING_FINAL_BRAKE_ACTIVE.remove(vehicle);
             AUTO_BRAKE_INPUT.remove(vehicle);
             POST_LANDING_BRAKE.remove(vehicle);
+            LAST_CLIENT_BOOST_SYNC.remove(vehicle);
             return;
         }
 
@@ -1820,17 +1827,10 @@ public final class CruiseController {
             setBoosting(vehicle, access, false);
             return;
         }
-        if (route.isFinalTarget() && route.getEffectiveLandingMode() == CruiseRoute.LandingMode.VERTICAL) {
-            setBoosting(vehicle, access, false);
-            return;
+        if (vehicle instanceof EngineVehicle engineVehicle) {
+            float target = access.iacruise$isBoosting() ? BOOST_TARGET_LEVEL.getOrDefault(engineVehicle, 1.0f) : 0.0f;
+            updateBoostLevel(engineVehicle, target, access.iacruise$isBoosting());
         }
-        CruiseRoute.Waypoint waypoint = route.getTarget();
-        Vec3 referencePosition = horizontalReferencePosition(vehicle);
-        double dx = waypoint.x() + 0.5 - referencePosition.x;
-        double dz = waypoint.z() + 0.5 - referencePosition.z;
-        double altitudeError = navigationAltitude(route) - vehicle.getY();
-        float yawError = yawError(vehicle.getYRot(), dx, dz);
-        setBoosting(vehicle, access, shouldBoost(access, yawError, altitudeError, isAwayFromFinal(vehicle, route)));
     }
 
     private static float altitudeInput(VehicleEntity vehicle, double altitudeError) {
@@ -1876,21 +1876,31 @@ public final class CruiseController {
     private static void setBoosting(VehicleEntity vehicle, CruiseVehicleAccess access, boolean boosting, float targetBoostLevel) {
         access.iacruise$setBoosting(boosting);
         if (vehicle instanceof EngineVehicle engineVehicle) {
-            updateBoostLevel(engineVehicle, boosting ? targetBoostLevel : 0.0f, boosting);
+            float target = boosting ? targetBoostLevel : 0.0f;
+            if (boosting) {
+                BOOST_TARGET_LEVEL.put(engineVehicle, Mth.clamp(target, 0.0f, 1.0f));
+            } else {
+                BOOST_TARGET_LEVEL.remove(engineVehicle);
+            }
+            updateBoostLevel(engineVehicle, target, boosting);
         }
+        syncLocalPilotBoostingState(vehicle, boosting, targetBoostLevel);
     }
 
     private static void stopBoostingImmediately(VehicleEntity vehicle, CruiseVehicleAccess access) {
         access.iacruise$setBoosting(false);
         if (vehicle instanceof EngineVehicle engineVehicle) {
             BOOST_LEVEL.remove(engineVehicle);
+            BOOST_TARGET_LEVEL.remove(engineVehicle);
         }
+        syncLocalPilotBoostingState(vehicle, false, 0.0f);
     }
 
     private static void stopNavigationEffects(VehicleEntity vehicle, CruiseVehicleAccess access) {
         access.iacruise$setBoosting(false);
         if (vehicle instanceof EngineVehicle engineVehicle) {
             BOOST_LEVEL.remove(engineVehicle);
+            BOOST_TARGET_LEVEL.remove(engineVehicle);
         }
         LAST_PILOT.remove(vehicle);
         TURN_MEMORY.remove(vehicle);
@@ -1899,12 +1909,53 @@ public final class CruiseController {
         FAST_LANDING_FINAL_BRAKE_ACTIVE.remove(vehicle);
         AUTO_BRAKE_INPUT.remove(vehicle);
         POST_LANDING_BRAKE.remove(vehicle);
+        LAST_CLIENT_BOOST_SYNC.remove(vehicle);
+        syncLocalPilotBoostingState(vehicle, false, 0.0f);
+    }
+
+    private static void syncLocalPilotBoostingState(VehicleEntity vehicle, boolean boosting, float targetBoostLevel) {
+        if (!vehicle.level().isClientSide()) {
+            return;
+        }
+        if (!(vehicle.getControllingPassenger() instanceof Player player) || !player.isLocalPlayer()) {
+            return;
+        }
+        int levelStep = boostSyncLevelStep(boosting, targetBoostLevel);
+        BoostSyncState previous = LAST_CLIENT_BOOST_SYNC.get(vehicle);
+        boolean stateChanged = previous == null || previous.boosting() != boosting;
+        boolean levelChanged = previous == null || previous.levelStep() != levelStep;
+        boolean intervalElapsed = previous == null || vehicle.tickCount - previous.tick() >= BOOST_SYNC_INTERVAL_TICKS;
+        if (!stateChanged && (!levelChanged || !intervalElapsed)) {
+            return;
+        }
+        LAST_CLIENT_BOOST_SYNC.put(vehicle, new BoostSyncState(boosting, levelStep, vehicle.tickCount));
+        CruiseNetwork.CHANNEL.sendToServer(new UpdateCruiseBoostPacket(vehicle.getId(), boosting, boostLevelFromStep(levelStep)));
+    }
+
+    private static int boostSyncLevelStep(boolean boosting, float targetBoostLevel) {
+        if (!boosting) {
+            return 0;
+        }
+        return Mth.clamp(Math.round(targetBoostLevel * BOOST_SYNC_LEVEL_STEPS), 0, BOOST_SYNC_LEVEL_STEPS);
+    }
+
+    private static float boostLevelFromStep(int levelStep) {
+        return Mth.clamp(levelStep, 0, BOOST_SYNC_LEVEL_STEPS) / (float) BOOST_SYNC_LEVEL_STEPS;
     }
 
     public static void stopNavigation(VehicleEntity vehicle, CruiseRoute route, ServerPlayer messagePlayer) {
         if (vehicle instanceof CruiseVehicleAccess access) {
             stopNavigation(vehicle, access, route, messagePlayer, vehicle.level().isClientSide());
         }
+    }
+
+    public static void updatePilotBoostingState(VehicleEntity vehicle, boolean boosting, float boostLevel) {
+        if (vehicle.level().isClientSide() || !(vehicle instanceof CruiseVehicleAccess access)) {
+            return;
+        }
+        CruiseRoute route = serverRoute(vehicle, access);
+        boolean active = boosting && route.isEnabled() && !route.isHoldingPattern() && route.hasTarget();
+        setBoosting(vehicle, access, active, active ? boostLevel : 0.0f);
     }
 
     private static void stopNavigation(VehicleEntity vehicle, CruiseVehicleAccess access, CruiseRoute route,
@@ -2238,6 +2289,9 @@ public final class CruiseController {
     }
 
     private record SpeedSample(Vec3 position, int tickCount) {
+    }
+
+    private record BoostSyncState(boolean boosting, int levelStep, int tick) {
     }
 
     public static Vec3 targetPosition(VehicleEntity vehicle) {
