@@ -98,6 +98,7 @@ public final class CruiseController {
     private static final int POST_LANDING_STOPPED_TICKS = 10;
     private static final float FAST_LANDING_YAW_DEAD_ZONE = 0.2f;
     private static final float FAST_LANDING_MIN_TURN_INPUT = 0.08f;
+    private static final float FAST_LANDING_APPROACH_YAW_LIMIT = 45.0f;
     private static final float FAST_DESCENT_AIRPLANE_PITCH = 1.0f;
     private static final float FAST_DESCENT_VERTICAL_INPUT = -1.0f;
     private static final float YAW_DEAD_ZONE = 3.0f;
@@ -612,6 +613,13 @@ public final class CruiseController {
             return true;
         }
 
+        float yawError = yawError(vehicle.getYRot(), dx, dz);
+        if (!LANDING_ACTIVE.containsKey(vehicle)
+                && !FAST_LANDING_FINAL_BRAKE_ACTIVE.containsKey(vehicle)
+                && Math.abs(yawError) > FAST_LANDING_APPROACH_YAW_LIMIT) {
+            return false;
+        }
+
         FastLandingPlan plan = fastLandingPlan(vehicle, horizontalDistance, altitudeError, landingHorizontalRadius);
         boolean descentCommitted = LANDING_ACTIVE.containsKey(vehicle) || plan.descend();
         boolean finalBrake = FAST_LANDING_FINAL_BRAKE_ACTIVE.containsKey(vehicle) || plan.brake();
@@ -626,7 +634,6 @@ public final class CruiseController {
             FAST_LANDING_FINAL_BRAKE_ACTIVE.put(vehicle, true);
         }
 
-        float yawError = yawError(vehicle.getYRot(), dx, dz);
         float turn = horizontalDistance > FAST_LANDING_TURN_RADIUS ? fastLandingTurnInput(vehicle, yawError, horizontalDistance) : 0.0f;
         boolean activelyReducingSpeed = finalBrake;
         FlareEstimate flareEstimate = flareEstimate(vehicle, finalBrake, plan.boostTarget(), horizontalDistance,
