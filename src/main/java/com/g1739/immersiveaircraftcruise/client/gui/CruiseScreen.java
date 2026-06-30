@@ -72,6 +72,7 @@ public class CruiseScreen extends Screen {
     private boolean movingHud;
     private int dragOffsetX;
     private int dragOffsetY;
+    private int runtimeSelectedRoute = -1;
 
     public CruiseScreen(int entityId, CruiseRoute route) {
         this(entityId, route, false);
@@ -82,6 +83,7 @@ public class CruiseScreen extends Screen {
         this.entityId = entityId;
         this.route = route.copy();
         this.readOnly = readOnly;
+        this.runtimeSelectedRoute = route.getSelectedRoute();
         loadSelectedRoute();
     }
 
@@ -490,11 +492,16 @@ public class CruiseScreen extends Screen {
     public void updateRuntime(CruiseRoute syncedRoute) {
         if (syncedRoute != null && readOnly) {
             route = syncedRoute.copy();
+            runtimeSelectedRoute = syncedRoute.getSelectedRoute();
             loadSelectedRoute();
             rebuildCruiseWidgets();
             return;
         }
-        if (syncedRoute == null || syncedRoute.getSelectedRoute() != route.getSelectedRoute()) {
+        if (syncedRoute == null) {
+            return;
+        }
+        runtimeSelectedRoute = syncedRoute.getSelectedRoute();
+        if (syncedRoute.getSelectedRoute() != route.getSelectedRoute()) {
             return;
         }
         if (dirty) {
@@ -733,14 +740,15 @@ public class CruiseScreen extends Screen {
 
         int listTop = 104;
         int visibleRows = visibleRows(listTop);
+        boolean showRuntimeProgress = showRuntimeProgress();
         for (int row = 0; row < visibleRows; row++) {
             int index = scrollOffset + row;
             if (index >= waypoints.size()) {
                 break;
             }
             int y = listTop + row * ROW_HEIGHT + 6;
-            boolean reached = previewRoute.isWaypointReached(index);
-            boolean current = previewRoute.isWaypointCurrent(index);
+            boolean reached = showRuntimeProgress && previewRoute.isWaypointReached(index);
+            boolean current = showRuntimeProgress && previewRoute.isWaypointCurrent(index);
             String label = (reached ? "● " : current ? "▶ " : "• ") + routeDisplayName(index);
             graphics.drawString(font, Component.literal(label), left, y, reached ? 0x88CC88 : current ? 0xFFE28A : 0xD8D8D8, false);
         }
@@ -827,10 +835,17 @@ public class CruiseScreen extends Screen {
         CruiseRoute preview = route.copy();
         preview.setSelectedEntry(buildSelectedEntry());
         CruiseRoute liveRoute = liveVehicleRoute();
-        if (liveRoute != null) {
+        if (liveRoute != null && liveRoute.getSelectedRoute() == route.getSelectedRoute()) {
             preview.applyRuntimeFrom(liveRoute);
         }
+        if (!showRuntimeProgress()) {
+            preview.resetProgress();
+        }
         return preview;
+    }
+
+    private boolean showRuntimeProgress() {
+        return route.getSelectedRoute() == runtimeSelectedRoute;
     }
 
     private CruiseRoute liveVehicleRoute() {
