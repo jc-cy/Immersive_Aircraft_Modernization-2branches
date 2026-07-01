@@ -35,7 +35,7 @@ group = modGroupId
 version = modVersion
 
 base {
-    archivesName.set(modName)
+    archivesName.set("$modName-NeoForge-$minecraftVersion")
 }
 
 java {

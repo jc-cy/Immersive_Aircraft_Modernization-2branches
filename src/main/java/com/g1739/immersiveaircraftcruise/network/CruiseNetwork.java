@@ -11,7 +11,7 @@ import net.neoforged.neoforge.network.registration.PayloadRegistrar;
 
 @EventBusSubscriber(modid = ImmersiveAircraftCruise.MOD_ID, bus = EventBusSubscriber.Bus.MOD)
 public final class CruiseNetwork {
-    private static final String PROTOCOL_VERSION = "18";
+    private static final String PROTOCOL_VERSION = "19";
 
     private CruiseNetwork() {
     }

@@ -51,6 +51,8 @@
   "message.immersive_aircraft_cruise.paused": "Auto navigation exited.",
   "message.immersive_aircraft_cruise.resumed": "Auto navigation resumed.",
   "message.immersive_aircraft_cruise.disabled": "Auto navigation exited.",
+  "message.immersive_aircraft_cruise.disabled_finished": "Navigation complete. Auto navigation exited.",
+  "message.immersive_aircraft_cruise.disabled_collision": "Aircraft impact detected. Auto navigation exited.",
   "message.immersive_aircraft_cruise.hud_enabled": "Info display enabled.",
   "message.immersive_aircraft_cruise.hud_disabled": "Info display disabled.",
   "message.immersive_aircraft_cruise.no_route": "Set at least one cruise waypoint first.",

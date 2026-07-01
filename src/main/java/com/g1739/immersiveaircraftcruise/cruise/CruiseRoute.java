@@ -11,7 +11,7 @@ import java.util.List;
 public class CruiseRoute {
     public static final int MAX_ROUTES = 16;
     public static final int MAX_WAYPOINTS = 32;
-    public static final double LANDING_ALTITUDE_INPUT_OFFSET = 1.5d;
+    public static final double LANDING_ALTITUDE_INPUT_OFFSET = 0.0d;
 
     private boolean enabled;
     private boolean holdingPattern;

@@ -41,7 +41,10 @@ public abstract class VehicleEntityMixin implements CruiseVehicleAccess {
     @Override
     public void iacruise$setBoosting(boolean boosting) {
         immersive_aircraft_cruise$boosting = boosting;
-        CruiseModuleData.setBoosting((VehicleEntity) (Object) this, boosting);
+        VehicleEntity vehicle = (VehicleEntity) (Object) this;
+        if (!vehicle.level().isClientSide()) {
+            CruiseModuleData.setBoosting(vehicle, boosting);
+        }
     }
 
     @Inject(method = {"tick", "m_8119_"}, at = @At(value = "INVOKE", target = "Limmersive_aircraft/entity/VehicleEntity;updateVelocity()V"), remap = false)

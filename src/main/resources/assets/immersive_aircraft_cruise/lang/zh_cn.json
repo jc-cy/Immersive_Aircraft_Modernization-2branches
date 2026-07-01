@@ -51,6 +51,8 @@
   "message.immersive_aircraft_cruise.paused": "自动导航已退出。",
   "message.immersive_aircraft_cruise.resumed": "自动导航已继续。",
   "message.immersive_aircraft_cruise.disabled": "自动导航已退出。",
+  "message.immersive_aircraft_cruise.disabled_finished": "导航完成自动导航已退出。",
+  "message.immersive_aircraft_cruise.disabled_collision": "飞机遭受撞击自动导航已退出。",
   "message.immersive_aircraft_cruise.hud_enabled": "信息显示已开启。",
   "message.immersive_aircraft_cruise.hud_disabled": "信息显示已关闭。",
   "message.immersive_aircraft_cruise.no_route": "请先设置至少一个巡航航点。",

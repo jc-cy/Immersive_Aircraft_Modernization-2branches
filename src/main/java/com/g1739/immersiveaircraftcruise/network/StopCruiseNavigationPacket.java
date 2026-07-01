@@ -1,6 +1,7 @@
 package com.g1739.immersiveaircraftcruise.network;
 
 import com.g1739.immersiveaircraftcruise.cruise.CruiseController;
+import com.g1739.immersiveaircraftcruise.cruise.CruiseNavigationStopReason;
 import com.g1739.immersiveaircraftcruise.cruise.CruiseRoute;
 import immersive_aircraft.entity.VehicleEntity;
 import net.minecraft.network.FriendlyByteBuf;
@@ -21,26 +22,34 @@ public class StopCruiseNavigationPacket implements CustomPacketPayload {
     private final boolean holdingPattern;
     private final boolean initialAltitudeReached;
     private final CruiseRoute.Waypoint startPoint;
+    private final CruiseNavigationStopReason stopReason;
 
     public StopCruiseNavigationPacket(int entityId, CruiseRoute route) {
+        this(entityId, route, CruiseNavigationStopReason.NORMAL);
+    }
+
+    public StopCruiseNavigationPacket(int entityId, CruiseRoute route, CruiseNavigationStopReason stopReason) {
         this(
                 entityId,
                 route == null ? -1 : route.getSelectedRoute(),
                 route == null ? -1 : route.getCurrentIndex(),
                 route != null && route.isHoldingPattern(),
                 route != null && route.isInitialAltitudeReached(),
-                route == null ? null : route.getStartPoint()
+                route == null ? null : route.getStartPoint(),
+                stopReason
         );
     }
 
     private StopCruiseNavigationPacket(int entityId, int selectedRoute, int currentIndex, boolean holdingPattern,
-                                       boolean initialAltitudeReached, CruiseRoute.Waypoint startPoint) {
+                                       boolean initialAltitudeReached, CruiseRoute.Waypoint startPoint,
+                                       CruiseNavigationStopReason stopReason) {
         this.entityId = entityId;
         this.selectedRoute = selectedRoute;
         this.currentIndex = currentIndex;
         this.holdingPattern = holdingPattern;
         this.initialAltitudeReached = initialAltitudeReached;
         this.startPoint = startPoint;
+        this.stopReason = stopReason == null ? CruiseNavigationStopReason.NORMAL : stopReason;
     }
 
     public void encode(FriendlyByteBuf buffer) {
@@ -53,6 +62,7 @@ public class StopCruiseNavigationPacket implements CustomPacketPayload {
         if (startPoint != null) {
             startPoint.write(buffer);
         }
+        buffer.writeEnum(stopReason);
     }
 
     public static StopCruiseNavigationPacket decode(FriendlyByteBuf buffer) {
@@ -62,7 +72,9 @@ public class StopCruiseNavigationPacket implements CustomPacketPayload {
         boolean holdingPattern = buffer.readBoolean();
         boolean initialAltitudeReached = buffer.readBoolean();
         CruiseRoute.Waypoint startPoint = buffer.readBoolean() ? CruiseRoute.Waypoint.read(buffer) : null;
-        return new StopCruiseNavigationPacket(entityId, selectedRoute, currentIndex, holdingPattern, initialAltitudeReached, startPoint);
+        CruiseNavigationStopReason stopReason = buffer.readEnum(CruiseNavigationStopReason.class);
+        return new StopCruiseNavigationPacket(entityId, selectedRoute, currentIndex, holdingPattern,
+                initialAltitudeReached, startPoint, stopReason);
     }
 
     @Override
@@ -88,7 +100,7 @@ public class StopCruiseNavigationPacket implements CustomPacketPayload {
                 return;
             }
             packet.mergeClientProgress(vehicle, route);
-            CruiseController.stopNavigation(vehicle, route, player);
+            CruiseController.stopNavigation(vehicle, route, player, packet.stopReason);
         });
     }
 
