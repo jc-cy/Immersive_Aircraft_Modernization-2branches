@@ -316,6 +316,9 @@ public final class CruiseController {
         float yawError = yawError(vehicle.getYRot(), dx, dz);
         float turn = turnInput(vehicle, yawError);
         float climbInput = altitudeInput(vehicle, altitudeError);
+        if (tickRotorcraftLandingAlignGuard(vehicle, access, route, horizontalDistance, yawError, climbInput)) {
+            return;
+        }
 
         if (vehicle instanceof AirplaneEntity) {
             float pitchInput = -climbInput;
@@ -600,7 +603,7 @@ public final class CruiseController {
                 && horizontalSpeed(vehicle) <= LANDING_VERTICAL_STOP_SPEED;
         if (!LANDING_ACTIVE.containsKey(vehicle) && !aligned) {
             tickRotorcraftHoverControl(vehicle, waypoint.x() + 0.5, waypoint.z() + 0.5,
-                    route.getFinalFlightAltitude() - vehicle.getY(), false);
+                    route.getFinalFlightAltitude() - vehicle.getY(), false, true);
             return true;
         }
 
@@ -609,7 +612,7 @@ public final class CruiseController {
             return true;
         }
         tickRotorcraftHoverControl(vehicle, waypoint.x() + 0.5, waypoint.z() + 0.5,
-                landingAltitudeError(vehicle, route.getFinalAltitude()), true);
+                landingAltitudeError(vehicle, route.getFinalAltitude()), true, true);
         if (isLandingComplete(vehicle, waypoint, route.getFinalAltitude(), VERTICAL_AIRCRAFT_LANDING_HORIZONTAL_RADIUS,
                 LANDING_ALTITUDE_RADIUS, LANDING_VERTICAL_STOP_SPEED)) {
             finishLanding(vehicle, access, route, clientSide);
@@ -767,13 +770,14 @@ public final class CruiseController {
         float turn = horizontalDistance > FAST_LANDING_TURN_RADIUS
                 ? fastLandingTurnInput(vehicle, yawError, horizontalDistance)
                 : 0.0f;
-        boolean reversing = finalBrake && Math.abs(yawError) > ROTORCRAFT_FAST_LANDING_BACKWARD_YAW_LIMIT;
-        float forwardInput = rotorcraftForwardInput(vehicle, dx, dz, horizontalDistance, finalBrake, reversing);
+        boolean alignmentGuard = shouldRotorcraftLandingAlignGuard(horizontalDistance, yawError);
+        boolean reversing = !alignmentGuard && finalBrake && Math.abs(yawError) > ROTORCRAFT_FAST_LANDING_BACKWARD_YAW_LIMIT;
+        float forwardInput = alignmentGuard ? 0.0f : rotorcraftForwardInput(vehicle, dx, dz, horizontalDistance, finalBrake, reversing);
         float verticalInput = descentCommitted || finalBrake
                 ? rotorcraftDescentInput(vehicle, altitudeError)
                 : altitudeInput(vehicle, route.getTargetAltitude() - rotorcraftAltitudeY(vehicle));
 
-        if (finalBrake) {
+        if (finalBrake || alignmentGuard) {
             stopBoostingImmediately(vehicle, access);
         } else {
             setBoosting(vehicle, access, true);
@@ -1182,6 +1186,31 @@ public final class CruiseController {
         return true;
     }
 
+    private static boolean tickRotorcraftLandingAlignGuard(VehicleEntity vehicle, CruiseVehicleAccess access, CruiseRoute route,
+                                                           double horizontalDistance, float yawError, float verticalInput) {
+        if (!isVerticalAircraft(vehicle)
+                || !route.isFinalTarget()
+                || route.getEffectiveLandingMode() == CruiseRoute.LandingMode.HOLDING_PATTERN
+                || !shouldRotorcraftLandingAlignGuard(horizontalDistance, yawError)) {
+            return false;
+        }
+        stopBoostingImmediately(vehicle, access);
+        float turn = turnInput(vehicle, yawError);
+        setCruiseInputs(vehicle, turn, verticalInput, 0.0f);
+        if (turn != 0.0f) {
+            vehicle.setYRot(vehicle.getYRot() - turn * 1.5f);
+        }
+        if (vehicle instanceof EngineVehicle engineVehicle && engineVehicle.getEngineTarget() < 1.0f) {
+            engineVehicle.setEngineTarget(1.0f);
+        }
+        return true;
+    }
+
+    private static boolean shouldRotorcraftLandingAlignGuard(double horizontalDistance, float yawError) {
+        return horizontalDistance <= FAST_LANDING_ALIGN_RADIUS
+                && Math.abs(yawError) > FAST_LANDING_APPROACH_YAW_LIMIT;
+    }
+
     private static boolean isAirplaneLandingBrakeZone(VehicleEntity vehicle, double horizontalDistance) {
         double completionRadius = landingHorizontalRadius(vehicle, FAST_LANDING_COMPLETION_HORIZONTAL_RADIUS);
         return horizontalDistance <= completionRadius;
@@ -1226,18 +1255,24 @@ public final class CruiseController {
 
     private static void tickRotorcraftHoverControl(VehicleEntity vehicle, double targetX, double targetZ,
                                                    double altitudeError, boolean preciseAltitude) {
+        tickRotorcraftHoverControl(vehicle, targetX, targetZ, altitudeError, preciseAltitude, false);
+    }
+
+    private static void tickRotorcraftHoverControl(VehicleEntity vehicle, double targetX, double targetZ,
+                                                   double altitudeError, boolean preciseAltitude, boolean guardForwardAlignment) {
         Vec3 referencePosition = horizontalReferencePosition(vehicle);
         double dx = targetX - referencePosition.x;
         double dz = targetZ - referencePosition.z;
         double horizontalDistance = Math.sqrt(dx * dx + dz * dz);
         float yawError = yawError(vehicle.getYRot(), dx, dz);
-        boolean reversing = Math.abs(yawError) > ROTORCRAFT_FAST_LANDING_BACKWARD_YAW_LIMIT;
+        boolean alignmentGuard = guardForwardAlignment && shouldRotorcraftLandingAlignGuard(horizontalDistance, yawError);
+        boolean reversing = !alignmentGuard && Math.abs(yawError) > ROTORCRAFT_FAST_LANDING_BACKWARD_YAW_LIMIT;
         boolean aligned = horizontalDistance <= VERTICAL_AIRCRAFT_LANDING_HORIZONTAL_RADIUS
                 && horizontalSpeed(vehicle) <= LANDING_VERTICAL_STOP_SPEED;
         float turn = horizontalDistance > FAST_LANDING_TURN_RADIUS
                 ? fastLandingTurnInput(vehicle, yawError, horizontalDistance)
                 : 0.0f;
-        float forwardInput = rotorcraftForwardInput(vehicle, dx, dz, horizontalDistance, true, reversing);
+        float forwardInput = alignmentGuard ? 0.0f : rotorcraftForwardInput(vehicle, dx, dz, horizontalDistance, true, reversing);
         float verticalInput = preciseAltitude ? rotorcraftDescentInput(vehicle, altitudeError) : altitudeInput(vehicle, altitudeError);
 
         setCruiseInputs(vehicle, reversing ? 0.0f : turn, verticalInput, aligned ? 0.0f : forwardInput);
