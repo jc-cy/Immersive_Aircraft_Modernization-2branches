@@ -90,15 +90,26 @@ public final class CruiseController {
     private static final double AIRPLANE_GROUND_APPROACH_DEAD_ZONE = 0.25;
     private static final float AIRPLANE_GROUND_APPROACH_INPUT = 1.0f;
     private static final double AIRPLANE_GROUND_APPROACH_CAPTURE_RADIUS = 3.0;
-    private static final float AIRPLANE_GROUND_TURNAROUND_INPUT = 0.25f;
-    private static final float AIRPLANE_GROUND_TURN_INPUT = 0.25f;
+    private static final float AIRPLANE_GROUND_TURNAROUND_INPUT = 0.8f;
+    private static final float AIRPLANE_GROUND_TURN_INPUT = 0.8f;
     private static final float AIRPLANE_GROUND_REVERSE_YAW_DEAD_ZONE = 8.0f;
     private static final double AIRPLANE_GROUND_REVERSE_LATERAL_DEAD_ZONE = 0.75d;
-    private static final float AIRPLANE_GROUND_REVERSE_TURN_MAX_INPUT = 0.10f;
+    private static final float AIRPLANE_GROUND_REVERSE_TURN_MAX_INPUT = 0.45f;
     private static final int POST_LANDING_STOPPED_TICKS = 10;
     private static final float FAST_LANDING_YAW_DEAD_ZONE = 0.2f;
     private static final float FAST_LANDING_MIN_TURN_INPUT = 0.08f;
     private static final float FAST_LANDING_APPROACH_YAW_LIMIT = 45.0f;
+    private static final double FAST_LANDING_ALIGN_RADIUS = 30.0d;
+    private static final double FAST_LANDING_GROUND_APPROACH_RADIUS = 6.0d;
+    private static final float FAST_LANDING_GROUND_TAXI_YAW_LIMIT = 70.0f;
+    private static final float FAST_LANDING_GROUND_TAXI_FORWARD_INPUT = 1.0f;
+    private static final float FAST_LANDING_GROUND_TAXI_THROTTLE_INPUT = 0.2f;
+    private static final float FAST_LANDING_GROUND_TAXI_BRAKE_INPUT = -0.35f;
+    private static final double FAST_LANDING_GROUND_TAXI_TARGET_SPEED = 8.0d / 20.0d;
+    private static final double FAST_LANDING_GROUND_TAXI_SPEED_TOLERANCE = 1.0d / 20.0d;
+    private static final double FAST_LANDING_GROUND_APPROACH_BRAKE_SPEED = 2.0d / 20.0d;
+    private static final float AIRPLANE_GROUND_CLEAR_THROTTLE_INPUT = -1.0f;
+    private static final float AIRPLANE_GROUND_ENGINE_CLEAR_THRESHOLD = 0.02f;
     private static final float FAST_DESCENT_AIRPLANE_PITCH = 1.0f;
     private static final float FAST_DESCENT_VERTICAL_INPUT = -1.0f;
     private static final float YAW_DEAD_ZONE = 3.0f;
@@ -237,6 +248,10 @@ public final class CruiseController {
                 stopNavigation(vehicle, access, route, LAST_PILOT.remove(vehicle), false);
                 return;
             }
+        }
+
+        if (handleNavigationHorizontalCollision(vehicle, access, route, clientSide)) {
+            return;
         }
 
         if (braking && !automaticBrakeInput) {
@@ -573,6 +588,13 @@ public final class CruiseController {
         if (horizontalDistance > WAYPOINT_RADIUS && !LANDING_ACTIVE.containsKey(vehicle)) {
             return false;
         }
+        Vec3 referencePosition = horizontalReferencePosition(vehicle);
+        double dx = waypoint.x() + 0.5 - referencePosition.x;
+        double dz = waypoint.z() + 0.5 - referencePosition.z;
+        float yawError = yawError(vehicle.getYRot(), dx, dz);
+        if (!LANDING_ACTIVE.containsKey(vehicle) && Math.abs(yawError) > FAST_LANDING_APPROACH_YAW_LIMIT) {
+            return false;
+        }
         setBoosting(vehicle, access, false);
         boolean aligned = horizontalDistance <= VERTICAL_AIRCRAFT_LANDING_HORIZONTAL_RADIUS
                 && horizontalSpeed(vehicle) <= LANDING_VERTICAL_STOP_SPEED;
@@ -583,7 +605,7 @@ public final class CruiseController {
         }
 
         LANDING_ACTIVE.put(vehicle, true);
-        if (handleLandingGroundCollision(vehicle, access, route, clientSide)) {
+        if (handleNavigationHorizontalCollision(vehicle, access, route, clientSide)) {
             return true;
         }
         tickRotorcraftHoverControl(vehicle, waypoint.x() + 0.5, waypoint.z() + 0.5,
@@ -616,7 +638,29 @@ public final class CruiseController {
         float yawError = yawError(vehicle.getYRot(), dx, dz);
         if (!LANDING_ACTIVE.containsKey(vehicle)
                 && !FAST_LANDING_FINAL_BRAKE_ACTIVE.containsKey(vehicle)
+                && vehicle instanceof AirplaneEntity
+                && vehicle.onGround()
+                && (horizontalDistance <= FAST_LANDING_GROUND_APPROACH_RADIUS
+                || altitudeError <= FAST_LANDING_COMPLETION_ALTITUDE_RADIUS)
+                && horizontalDistance <= FAST_LANDING_ALIGN_RADIUS) {
+            stopBoostingImmediately(vehicle, access);
+            if (handleNavigationHorizontalCollision(vehicle, access, route, clientSide)) {
+                return true;
+            }
+            if (isFastLandingReadyForPostBrake(vehicle, landingTarget.x(), landingTarget.z(), route.getFinalAltitude())) {
+                beginPostLandingBrake(vehicle, access, route, clientSide);
+                return true;
+            }
+            tickFastLandingGroundGuard(vehicle, yawError, horizontalDistance, dx, dz);
+            return true;
+        }
+        if (!LANDING_ACTIVE.containsKey(vehicle)
+                && !FAST_LANDING_FINAL_BRAKE_ACTIVE.containsKey(vehicle)
                 && Math.abs(yawError) > FAST_LANDING_APPROACH_YAW_LIMIT) {
+            if (tickFastLandingAlignGuard(vehicle, yawError, horizontalDistance)) {
+                stopBoostingImmediately(vehicle, access);
+                return true;
+            }
             return false;
         }
 
@@ -651,7 +695,7 @@ public final class CruiseController {
             float pitchInput = forceDescent ? FAST_DESCENT_AIRPLANE_PITCH : -climbInput;
             clampLandingPitch(vehicle);
             updateFastLandingPassState(vehicle, dx, dz, horizontalDistance);
-            if (finalBrake && handleLandingGroundCollision(vehicle, access, route, clientSide)) {
+            if (finalBrake && handleNavigationHorizontalCollision(vehicle, access, route, clientSide)) {
                 return true;
             }
             boolean groundApproach = finalBrake && vehicle.onGround();
@@ -659,7 +703,11 @@ public final class CruiseController {
             float forwardInput = groundApproach
                     ? (groundBrakeZone ? 0.0f : airplaneGroundApproachInput(vehicle, dx, dz, horizontalDistance))
                     : pitchInput;
-            if (groundApproach && forwardInput < -0.01f) {
+            float brakeInput = airplaneLandingBrakeInput(vehicle, finalBrake, horizontalDistance);
+            if (groundApproach && !groundBrakeZone && !isAirplaneGroundEngineCleared(vehicle)) {
+                brakeInput = AIRPLANE_GROUND_CLEAR_THROTTLE_INPUT;
+                forwardInput = 0.0f;
+            } else if (groundApproach && forwardInput < -0.01f) {
                 turn = airplaneGroundReverseTurnInput(yawError, horizontalDistance);
             } else {
                 if (groundApproach && isAirplaneCapturedOvershoot(vehicle, horizontalDistance)) {
@@ -669,7 +717,6 @@ public final class CruiseController {
                     turn = Mth.clamp(turn, -AIRPLANE_GROUND_TURNAROUND_INPUT, AIRPLANE_GROUND_TURNAROUND_INPUT);
                 }
             }
-            float brakeInput = airplaneLandingBrakeInput(vehicle, finalBrake, horizontalDistance);
             setCruiseInputs(vehicle, turn, brakeInput, forwardInput);
         } else {
             float verticalInput = forceDescent ? FAST_DESCENT_VERTICAL_INPUT : climbInput;
@@ -697,6 +744,12 @@ public final class CruiseController {
                                                         double dx, double dz, boolean clientSide) {
         double targetAltitude = rotorcraftFinalAltitude(route);
         double altitudeError = rotorcraftAltitudeError(vehicle, targetAltitude);
+        float yawError = yawError(vehicle.getYRot(), dx, dz);
+        if (!LANDING_ACTIVE.containsKey(vehicle)
+                && !FAST_LANDING_FINAL_BRAKE_ACTIVE.containsKey(vehicle)
+                && Math.abs(yawError) > FAST_LANDING_APPROACH_YAW_LIMIT) {
+            return false;
+        }
         RotorcraftLandingPlan plan = rotorcraftLandingPlan(vehicle, horizontalDistance, altitudeError);
         boolean descentCommitted = LANDING_ACTIVE.containsKey(vehicle) || plan.descend();
         boolean finalBrake = FAST_LANDING_FINAL_BRAKE_ACTIVE.containsKey(vehicle) || plan.brake();
@@ -711,7 +764,6 @@ public final class CruiseController {
             FAST_LANDING_FINAL_BRAKE_ACTIVE.put(vehicle, true);
         }
 
-        float yawError = yawError(vehicle.getYRot(), dx, dz);
         float turn = horizontalDistance > FAST_LANDING_TURN_RADIUS
                 ? fastLandingTurnInput(vehicle, yawError, horizontalDistance)
                 : 0.0f;
@@ -726,7 +778,7 @@ public final class CruiseController {
         } else {
             setBoosting(vehicle, access, true);
         }
-        if (finalBrake && handleLandingGroundCollision(vehicle, access, route, clientSide)) {
+        if (finalBrake && handleNavigationHorizontalCollision(vehicle, access, route, clientSide)) {
             return true;
         }
         setCruiseInputs(vehicle, reversing ? 0.0f : turn, verticalInput, forwardInput);
@@ -759,7 +811,7 @@ public final class CruiseController {
         }
 
         stopBoostingImmediately(vehicle, access);
-        if (handleLandingGroundCollision(vehicle, access, route, clientSide)) {
+        if (handleNavigationHorizontalCollision(vehicle, access, route, clientSide)) {
             return;
         }
         if (tickPostLandingStopped(vehicle, access, route, clientSide)) {
@@ -771,18 +823,19 @@ public final class CruiseController {
             setCruiseInputs(vehicle, 0.0f, 0.0f, 0.0f);
             vehicle.setDeltaMovement(brakedVelocity(vehicle, 0.86d));
         }
-        if (vehicle instanceof EngineVehicle engineVehicle) {
+        if (!(vehicle instanceof AirplaneEntity) && vehicle instanceof EngineVehicle engineVehicle) {
             engineVehicle.setEngineTarget(Math.max(0.0f, engineVehicle.getEngineTarget() - 0.1f));
         }
         POST_LANDING_BRAKE.put(vehicle, ticks - 1);
     }
 
-    private static boolean handleLandingGroundCollision(VehicleEntity vehicle, CruiseVehicleAccess access,
-                                                        CruiseRoute route, boolean clientSide) {
+    private static boolean handleNavigationHorizontalCollision(VehicleEntity vehicle, CruiseVehicleAccess access,
+                                                               CruiseRoute route, boolean clientSide) {
         if (!vehicle.horizontalCollision) {
             return false;
         }
-        stopNavigation(vehicle, access, route, controllingServerPlayer(vehicle), clientSide);
+        stopNavigation(vehicle, access, route, controllingServerPlayer(vehicle), clientSide,
+                CruiseNavigationStopReason.COLLISION);
         if (clientSide) {
             syncStoppedNavigationToServer(vehicle, route);
         }
@@ -802,6 +855,25 @@ public final class CruiseController {
         }
         finishLanding(vehicle, access, route, clientSide);
         return true;
+    }
+
+    private static float airplaneGroundEngineTarget(VehicleEntity vehicle) {
+        return vehicle instanceof EngineVehicle engineVehicle ? engineVehicle.getEngineTarget() : 0.0f;
+    }
+
+    private static boolean isAirplaneGroundEngineCleared(VehicleEntity vehicle) {
+        return airplaneGroundEngineTarget(vehicle) <= AIRPLANE_GROUND_ENGINE_CLEAR_THRESHOLD;
+    }
+
+    private static float airplaneGroundTaxiThrottleInput(VehicleEntity vehicle) {
+        double speed = horizontalSpeed(vehicle);
+        if (speed > FAST_LANDING_GROUND_TAXI_TARGET_SPEED + FAST_LANDING_GROUND_TAXI_SPEED_TOLERANCE) {
+            return FAST_LANDING_GROUND_TAXI_BRAKE_INPUT;
+        }
+        if (speed < FAST_LANDING_GROUND_TAXI_TARGET_SPEED - FAST_LANDING_GROUND_TAXI_SPEED_TOLERANCE) {
+            return FAST_LANDING_GROUND_TAXI_THROTTLE_INPUT;
+        }
+        return 0.0f;
     }
 
     private static void tickCirclingDescent(VehicleEntity vehicle, CruiseRoute route, double altitudeError) {
@@ -884,7 +956,8 @@ public final class CruiseController {
         LANDING_ACTIVE.remove(vehicle);
         POST_LANDING_BRAKE.remove(vehicle);
         clearLandingAssistState(vehicle);
-        stopNavigation(vehicle, access, route, controllingServerPlayer(vehicle), clientSide);
+        stopNavigation(vehicle, access, route, controllingServerPlayer(vehicle), clientSide,
+                CruiseNavigationStopReason.FINISHED);
         if (clientSide) {
             syncFinishedNavigationToServer(vehicle, route);
         }
@@ -892,13 +965,15 @@ public final class CruiseController {
 
     private static void syncFinishedNavigationToServer(VehicleEntity vehicle, CruiseRoute route) {
         if (vehicle.getControllingPassenger() instanceof Player player && player.isLocalPlayer()) {
-            CruiseNetwork.CHANNEL.sendToServer(new StopCruiseNavigationPacket(vehicle.getId(), route));
+            CruiseNetwork.CHANNEL.sendToServer(new StopCruiseNavigationPacket(vehicle.getId(), route,
+                    CruiseNavigationStopReason.FINISHED));
         }
     }
 
     private static void syncStoppedNavigationToServer(VehicleEntity vehicle, CruiseRoute route) {
         if (vehicle.getControllingPassenger() instanceof Player player && player.isLocalPlayer()) {
-            CruiseNetwork.CHANNEL.sendToServer(new StopCruiseNavigationPacket(vehicle.getId(), route));
+            CruiseNetwork.CHANNEL.sendToServer(new StopCruiseNavigationPacket(vehicle.getId(), route,
+                    CruiseNavigationStopReason.COLLISION));
         }
     }
 
@@ -1065,6 +1140,46 @@ public final class CruiseController {
             return 0.0f;
         }
         return !vehicle.onGround() || isAirplaneLandingBrakeZone(vehicle, horizontalDistance) ? -1.0f : 0.0f;
+    }
+
+    private static void tickFastLandingGroundGuard(VehicleEntity vehicle, float yawError,
+                                                   double horizontalDistance, double dx, double dz) {
+        updateFastLandingPassState(vehicle, dx, dz, horizontalDistance);
+
+        boolean groundBrakeZone = isAirplaneLandingBrakeZone(vehicle, horizontalDistance);
+        float turn = horizontalDistance > FAST_LANDING_TURN_RADIUS ? fastLandingTurnInput(vehicle, yawError, horizontalDistance) : 0.0f;
+        float throttleInput = 0.0f;
+        float forwardInput = 0.0f;
+        if (groundBrakeZone || horizontalDistance <= FAST_LANDING_GROUND_APPROACH_RADIUS
+                && (!isAirplaneGroundEngineCleared(vehicle)
+                || horizontalSpeed(vehicle) > FAST_LANDING_GROUND_APPROACH_BRAKE_SPEED)) {
+            throttleInput = AIRPLANE_GROUND_CLEAR_THROTTLE_INPUT;
+        } else if (!groundBrakeZone) {
+            if (horizontalDistance <= FAST_LANDING_GROUND_APPROACH_RADIUS) {
+                forwardInput = airplaneGroundApproachInput(vehicle, dx, dz, horizontalDistance);
+                if (forwardInput < -0.01f) {
+                    turn = airplaneGroundReverseTurnInput(yawError, horizontalDistance);
+                } else if (isAirplaneCapturedOvershoot(vehicle, horizontalDistance)) {
+                    turn = Mth.clamp(turn, -AIRPLANE_GROUND_TURN_INPUT, AIRPLANE_GROUND_TURN_INPUT);
+                } else if (isAirplaneWideOvershoot(vehicle, horizontalDistance)) {
+                    turn = Mth.clamp(turn, -AIRPLANE_GROUND_TURNAROUND_INPUT, AIRPLANE_GROUND_TURNAROUND_INPUT);
+                }
+            } else if (Math.abs(yawError) <= FAST_LANDING_GROUND_TAXI_YAW_LIMIT) {
+                throttleInput = airplaneGroundTaxiThrottleInput(vehicle);
+                forwardInput = throttleInput < -0.01f ? 0.0f : FAST_LANDING_GROUND_TAXI_FORWARD_INPUT;
+            }
+        }
+
+        setCruiseInputs(vehicle, turn, throttleInput, forwardInput);
+    }
+
+    private static boolean tickFastLandingAlignGuard(VehicleEntity vehicle, float yawError, double horizontalDistance) {
+        if (!(vehicle instanceof AirplaneEntity) || vehicle.onGround() || horizontalDistance > FAST_LANDING_ALIGN_RADIUS) {
+            return false;
+        }
+        float turn = turnInput(vehicle, yawError);
+        setCruiseInputs(vehicle, turn, -0.45f, 0.0f);
+        return true;
     }
 
     private static boolean isAirplaneLandingBrakeZone(VehicleEntity vehicle, double horizontalDistance) {
@@ -2109,8 +2224,13 @@ public final class CruiseController {
     }
 
     public static void stopNavigation(VehicleEntity vehicle, CruiseRoute route, ServerPlayer messagePlayer) {
+        stopNavigation(vehicle, route, messagePlayer, CruiseNavigationStopReason.NORMAL);
+    }
+
+    public static void stopNavigation(VehicleEntity vehicle, CruiseRoute route, ServerPlayer messagePlayer,
+                                      CruiseNavigationStopReason reason) {
         if (vehicle instanceof CruiseVehicleAccess access) {
-            stopNavigation(vehicle, access, route, messagePlayer, vehicle.level().isClientSide());
+            stopNavigation(vehicle, access, route, messagePlayer, vehicle.level().isClientSide(), reason);
         }
     }
 
@@ -2125,9 +2245,16 @@ public final class CruiseController {
 
     private static void stopNavigation(VehicleEntity vehicle, CruiseVehicleAccess access, CruiseRoute route,
                                        ServerPlayer messagePlayer, boolean clientSide) {
+        stopNavigation(vehicle, access, route, messagePlayer, clientSide, CruiseNavigationStopReason.NORMAL);
+    }
+
+    private static void stopNavigation(VehicleEntity vehicle, CruiseVehicleAccess access, CruiseRoute route,
+                                       ServerPlayer messagePlayer, boolean clientSide,
+                                       CruiseNavigationStopReason reason) {
         route.stopNavigation();
         stopNavigationEffects(vehicle, access);
         clearCruiseInputs(vehicle);
+        CruiseNavigationStopReason effectiveReason = reason == null ? CruiseNavigationStopReason.NORMAL : reason;
         if (!clientSide) {
             CruiseModuleData.write(vehicle, route);
             access.iacruise$setRoute(route.copy());
@@ -2137,7 +2264,7 @@ public final class CruiseController {
                     CruiseNetwork.CHANNEL.send(PacketDistributor.PLAYER.with(() -> messagePlayer),
                             new UpdateCruiseRoutePacket(vehicle.getId(), route.copy()));
                 }
-                messagePlayer.displayClientMessage(Component.translatable("message.immersive_aircraft_cruise.disabled"), true);
+                messagePlayer.displayClientMessage(Component.translatable(effectiveReason.messageKey()), true);
             }
         }
     }
