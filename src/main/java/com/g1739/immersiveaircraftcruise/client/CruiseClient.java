@@ -105,6 +105,7 @@ public final class CruiseClient {
             }
             brakeWasDown = brakeDown;
             dismountWasDown = dismountDown;
+            CruiseHud.clientTick();
             logClientFlightState();
             ClientPacketHandlers.processQueuedCruiseChunks();
         }

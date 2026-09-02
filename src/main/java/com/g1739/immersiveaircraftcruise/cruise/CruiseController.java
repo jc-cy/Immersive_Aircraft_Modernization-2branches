@@ -1775,6 +1775,7 @@ public final class CruiseController {
                     * Mth.clamp(inventoryVehicle.getProperties().get(VehicleStat.HORIZONTAL_DECAY), 0.0d, 1.0d);
         }
         double boostLevel = predictedRotorcraftBoostLevel(vehicle);
+        double maxSpeed = CruiseConfig.rotorcraftSpeedLimit() / 20.0d;
         double distance = 0.0d;
         for (int tick = 0; tick < tickLimit; tick++) {
             double stepRatio = Math.min(1.0d, ticks - tick);
@@ -1785,6 +1786,12 @@ public final class CruiseController {
             double thrust = Math.pow(enginePower, 5.0d) * engineSpeed;
             Vec3 thrustVelocity = forward.scale(thrust);
             velocity = velocity.add(thrustVelocity.scale(controlledThrustMultiplier(vehicle, boostLevel)));
+            if (maxSpeed > 0.0d) {
+                double horizontalSpeed = horizontalLength(velocity);
+                if (horizontalSpeed > maxSpeed) {
+                    velocity = velocity.scale(maxSpeed / horizontalSpeed);
+                }
+            }
             double stepDistance = horizontalLength(velocity);
             distance += stepDistance * stepRatio;
             boostLevel = nextPredictedBoostLevel(boostLevel, targetBoostLevel);
@@ -3093,19 +3100,40 @@ public final class CruiseController {
         }
         Vec3 before = CONTROLLER_VELOCITY_BEFORE.remove(vehicle);
         if (before == null) {
+            clampRotorcraftSpeed(vehicle, access);
             return;
         }
         float level = BOOST_LEVEL.getOrDefault(engineVehicle, 0.0f);
         double powerBonus = controlledPowerBonus(vehicle, level);
         if (Math.abs(powerBonus) <= 1.0E-6d) {
+            clampRotorcraftSpeed(vehicle, access);
             return;
         }
         Vec3 after = vehicle.getDeltaMovement();
         Vec3 controllerDelta = after.subtract(before).multiply(1.0d, 0.0d, 1.0d);
-        if (controllerDelta.lengthSqr() <= 1.0E-8d) {
+        if (controllerDelta.lengthSqr() > 1.0E-8d) {
+            vehicle.setDeltaMovement(after.add(controllerDelta.scale(powerBonus)));
+        }
+        clampRotorcraftSpeed(vehicle, access);
+    }
+
+    private static void clampRotorcraftSpeed(VehicleEntity vehicle, CruiseVehicleAccess access) {
+        if (!(vehicle instanceof Rotorcraft) || !canApplyCruiseModifiers((EngineVehicle) vehicle, access)
+                || !access.iacruise$getRoute().hasTarget()) {
             return;
         }
-        vehicle.setDeltaMovement(after.add(controllerDelta.scale(powerBonus)));
+        double limitBlocksPerSecond = CruiseConfig.rotorcraftSpeedLimit();
+        if (limitBlocksPerSecond <= 0.0d) {
+            return;
+        }
+        double maxSpeed = limitBlocksPerSecond / 20.0d;
+        Vec3 velocity = vehicle.getDeltaMovement();
+        double horizontalSpeed = Math.sqrt(velocity.x * velocity.x + velocity.z * velocity.z);
+        if (horizontalSpeed <= maxSpeed || horizontalSpeed <= 1.0E-8d) {
+            return;
+        }
+        double factor = maxSpeed / horizontalSpeed;
+        vehicle.setDeltaMovement(velocity.x * factor, velocity.y, velocity.z * factor);
     }
 
     /**

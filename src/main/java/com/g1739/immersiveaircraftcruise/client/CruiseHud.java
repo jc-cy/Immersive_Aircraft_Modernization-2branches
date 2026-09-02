@@ -24,9 +24,14 @@ import java.util.Map;
 public final class CruiseHud {
     private static final double LOCAL_SPEED_MAX = 512.0d;
     private static final Map<Integer, FuelSnapshot> FUEL_INFO = new HashMap<>();
+    /** Flight time is sampled once per second from the client tick, never per render frame. */
+    private static final Map<Integer, FlightSnapshot> FLIGHT_INFO = new HashMap<>();
     private static final Map<Integer, PositionSample> LOCAL_SPEED_SAMPLES = new HashMap<>();
 
     private record FuelSnapshot(CruiseFuelInfo info, long clientGameTime) {
+    }
+
+    private record FlightSnapshot(int remainingTicks) {
     }
 
     private CruiseHud() {
@@ -78,14 +83,16 @@ public final class CruiseHud {
 
         int textX = x + 20;
         double speed = displaySpeed(vehicle, fuelInfo);
+        int flightRemainingTicks = flightTimeForDisplay(vehicle, route);
         ItemStack fuelIcon = fuelIcon(vehicle, fuelInfo);
         if (!fuelIcon.isEmpty()) {
             graphics.renderItem(fuelIcon, x, y + 20);
         }
         graphics.drawString(font, "速度 " + format(speed) + " 格/秒", textX, y + 2, 0xFFFFFF, true);
         graphics.drawString(font, "燃料剩余 " + fuelInfo.amountText(), textX, y + 22, 0xFFFFFF, true);
-        graphics.drawString(font, "剩余时间 " + formatTime(fuelInfo.remainingTicks()), x, y + 42, 0xFFFFFF, true);
-        int detailsY = y + 54;
+        graphics.drawString(font, "燃料剩余时间 " + formatTime(fuelInfo.remainingTicks()), x, y + 42, 0xFFFFFF, true);
+        graphics.drawString(font, "飞行剩余时间 " + formatTime(flightRemainingTicks), x, y + 52, 0xFFFFFF, true);
+        int detailsY = y + 64;
         String routeName = route.getSelectedRouteDisplayName();
         if (!routeName.isBlank()) {
             graphics.drawString(font, fitText(font, routeName, CruiseHudSettings.WIDTH), x, detailsY, 0xFFE28A, true);
@@ -158,6 +165,32 @@ public final class CruiseHud {
         return fuelInfo.speed();
     }
 
+    private static int flightTimeForDisplay(VehicleEntity vehicle, CruiseRoute route) {
+        if (route == null || !route.isEnabled() || !route.hasTarget()) {
+            return -1;
+        }
+        FlightSnapshot snapshot = FLIGHT_INFO.get(vehicle.getId());
+        if (snapshot == null) {
+            return -1;
+        }
+        return snapshot.remainingTicks();
+    }
+
+    private static int calculateFlightRemainingTicks(VehicleEntity vehicle, CruiseRoute route, double speed) {
+        if (route == null || !route.isEnabled() || !route.hasTarget()) {
+            return -1;
+        }
+        double distance = route.remainingHorizontalDistance(vehicle.getX(), vehicle.getZ());
+        if (distance <= 0.0d) {
+            return 0;
+        }
+        if (!Double.isFinite(speed) || speed <= 0.05d) {
+            return -1;
+        }
+        double ticks = distance * 20.0d / speed;
+        return ticks >= Integer.MAX_VALUE ? Integer.MAX_VALUE : Math.max(0, (int) Math.ceil(ticks));
+    }
+
     private static CruiseFuelInfo fuelInfoForDisplay(VehicleEntity vehicle) {
         FuelSnapshot snapshot = FUEL_INFO.get(vehicle.getId());
         CruiseFuelInfo info = snapshot == null ? CruiseFuelInfo.EMPTY : snapshot.info();
@@ -194,6 +227,36 @@ public final class CruiseHud {
         long elapsedTicks = Math.max(1L, clientGameTime - previous.clientGameTime());
         double sampledSpeed = vehicle.position().distanceTo(previous.position()) * 20.0d / elapsedTicks;
         return Math.max(velocitySpeed, sampledSpeed);
+    }
+
+    /**
+     * Refreshes the lightweight flight-time estimate once per real second. The
+     * HUD render path only reads the cached value, so high render rates and
+     * route length no longer add per-frame work.
+     */
+    public static void clientTick() {
+        Minecraft minecraft = Minecraft.getInstance();
+        if (minecraft.level == null || minecraft.player == null) {
+            return;
+        }
+        long gameTime = minecraft.level.getGameTime();
+        if (gameTime % 20L != 0L) {
+            return;
+        }
+        Entity root = minecraft.player.getRootVehicle();
+        if (!(root instanceof VehicleEntity vehicle)
+                || !(root instanceof CruiseVehicleAccess access)
+                || !CruiseModuleData.hasModule(vehicle)) {
+            return;
+        }
+        CruiseRoute route = access.iacruise$getRoute();
+        if (!route.isEnabled() || !route.hasTarget()) {
+            FLIGHT_INFO.remove(vehicle.getId());
+            return;
+        }
+        CruiseFuelInfo displayInfo = fuelInfoForDisplay(vehicle);
+        int remainingTicks = calculateFlightRemainingTicks(vehicle, route, displayInfo.speed());
+        FLIGHT_INFO.put(vehicle.getId(), new FlightSnapshot(remainingTicks));
     }
 
     private static String formatPoint(CruiseRoute.Waypoint waypoint) {
@@ -234,14 +297,20 @@ public final class CruiseHud {
     public static void setFuelInfo(int entityId, CruiseFuelInfo fuelInfo) {
         Minecraft minecraft = Minecraft.getInstance();
         long clientGameTime = minecraft.level == null ? -1L : minecraft.level.getGameTime();
+        CruiseFuelInfo syncedInfo = fuelInfo == null ? CruiseFuelInfo.EMPTY : fuelInfo;
         FUEL_INFO.put(entityId, new FuelSnapshot(
-                fuelInfo == null ? CruiseFuelInfo.EMPTY : fuelInfo,
+                syncedInfo,
                 clientGameTime));
     }
 
     public static void clearFuelInfo() {
         FUEL_INFO.clear();
+        FLIGHT_INFO.clear();
         LOCAL_SPEED_SAMPLES.clear();
+    }
+
+    public static void invalidateFlightTime(int entityId) {
+        FLIGHT_INFO.remove(entityId);
     }
 
     private record PositionSample(Vec3 position, long clientGameTime) {

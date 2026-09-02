@@ -440,6 +440,39 @@ public class CruiseRoute {
         return waypoints.isEmpty() ? null : waypoints.get(waypoints.size() - 1);
     }
 
+    /**
+     * Estimates the remaining horizontal route distance from the supplied
+     * vehicle position. L-shaped legs use their two-axis path length instead
+     * of the direct diagonal distance; altitude and landing manoeuvres are
+     * intentionally ignored because this is a lightweight HUD estimate.
+     */
+    public double remainingHorizontalDistance(double currentX, double currentZ) {
+        List<Waypoint> waypoints = getSelectedEntry().waypoints();
+        if (waypoints.isEmpty() || holdingPattern) {
+            return 0.0d;
+        }
+        int index = Math.max(0, Math.min(currentIndex, waypoints.size() - 1));
+        Waypoint target = waypoints.get(index);
+        double distance = segmentDistance(currentX, currentZ, target.x() + 0.5d, target.z() + 0.5d);
+        for (int i = index + 1; i < waypoints.size(); i++) {
+            Waypoint previous = waypoints.get(i - 1);
+            Waypoint next = waypoints.get(i);
+            distance += segmentDistance(previous.x() + 0.5d, previous.z() + 0.5d,
+                    next.x() + 0.5d, next.z() + 0.5d);
+        }
+        return Math.max(0.0d, distance);
+    }
+
+    private double segmentDistance(double startX, double startZ, double targetX, double targetZ) {
+        double dx = targetX - startX;
+        double dz = targetZ - startZ;
+        if (isLShapedSingleMode() && dx != 0.0d && dz != 0.0d
+                && Math.hypot(dx, dz) > L_SHAPED_MIN_HORIZONTAL_DISTANCE) {
+            return Math.abs(dx) + Math.abs(dz);
+        }
+        return Math.hypot(dx, dz);
+    }
+
     public int getTargetAltitude() {
         Waypoint target = getTarget();
         if (target == null) {
@@ -811,11 +844,11 @@ public class CruiseRoute {
         }
 
         public float powerBonus() {
-            return powerBonus;
+            return (float) CruiseConfig.powerBonus(this, powerBonus);
         }
 
         public float fuelBonus() {
-            return fuelBonus;
+            return (float) CruiseConfig.fuelBonus(this, fuelBonus);
         }
 
         public static CruiseMode byId(int id) {

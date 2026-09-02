@@ -155,6 +155,9 @@ public final class ClientPacketHandlers {
             CruiseRoute synced = route.copy();
             CruiseController.reconcileRouteDefinitionChange((VehicleEntity) entity, previous, synced);
             access.iacruise$setRoute(synced);
+            if (!synced.isEnabled() || !synced.hasTarget()) {
+                CruiseHud.invalidateFlightTime(entityId);
+            }
             if (previous == null || previous.isEnabled() != synced.isEnabled()) {
                 int prunedActiveChunks = synced.isEnabled() ? CruiseRouteCache.pruneInactive() : 0;
                 CruiseDebug.info(ImmersiveAircraftCruise.LOGGER,
