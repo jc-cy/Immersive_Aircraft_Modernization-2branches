@@ -11,7 +11,16 @@ import java.util.List;
 public class CruiseRoute {
     public static final int MAX_ROUTES = 16;
     public static final int MAX_WAYPOINTS = 32;
+    public static final double L_SHAPED_MIN_HORIZONTAL_DISTANCE = 512.0d;
+    public static final double L_FINAL_LANDING_HANDOFF_DISTANCE = 512.0d;
     public static final double LANDING_ALTITUDE_INPUT_OFFSET = 0.0d;
+
+    public static final int L_STAGE_AXIS_ALIGN = 0;
+    public static final int L_STAGE_CENTERLINE_CAPTURE = 1;
+    public static final int L_STAGE_FIRST_LEG = 2;
+    public static final int L_STAGE_CORNER_TURN = 3;
+    public static final int L_STAGE_FINAL_LEG = 4;
+    public static final int L_STAGE_MAX = L_STAGE_FINAL_LEG;
 
     private boolean enabled;
     private boolean holdingPattern;
@@ -19,6 +28,13 @@ public class CruiseRoute {
     private boolean initialAltitudeReached;
     private int selectedRoute;
     private int currentIndex;
+    /**
+     * L-shaped runtime state. The value is persisted so the client and
+     * server cannot silently fall back to a diagonal route after a pause.
+     */
+    private int loadingStage;
+    /** The lateral chunk-center line selected when the first axis reaches the 45 degree gate. */
+    private Integer lFirstLineCoordinate;
     private Waypoint startPoint;
     private final List<RouteEntry> routes;
 
@@ -32,12 +48,26 @@ public class CruiseRoute {
 
     public CruiseRoute(boolean enabled, boolean holdingPattern, boolean hudEnabled, int selectedRoute, int currentIndex, Waypoint startPoint,
                        boolean initialAltitudeReached, List<RouteEntry> routes) {
+        this(enabled, holdingPattern, hudEnabled, selectedRoute, currentIndex, startPoint,
+                initialAltitudeReached, 0, routes);
+    }
+
+    public CruiseRoute(boolean enabled, boolean holdingPattern, boolean hudEnabled, int selectedRoute, int currentIndex, Waypoint startPoint,
+                       boolean initialAltitudeReached, int loadingStage, List<RouteEntry> routes) {
+        this(enabled, holdingPattern, hudEnabled, selectedRoute, currentIndex, startPoint,
+                initialAltitudeReached, loadingStage, null, routes);
+    }
+
+    public CruiseRoute(boolean enabled, boolean holdingPattern, boolean hudEnabled, int selectedRoute, int currentIndex, Waypoint startPoint,
+                       boolean initialAltitudeReached, int loadingStage, Integer lFirstLineCoordinate, List<RouteEntry> routes) {
         this.enabled = enabled;
         this.holdingPattern = holdingPattern;
         this.hudEnabled = hudEnabled;
         this.initialAltitudeReached = initialAltitudeReached;
         this.selectedRoute = Math.max(0, selectedRoute);
         this.currentIndex = Math.max(0, currentIndex);
+        this.loadingStage = Math.max(0, Math.min(L_STAGE_MAX, loadingStage));
+        this.lFirstLineCoordinate = lFirstLineCoordinate;
         this.startPoint = startPoint;
         this.routes = new ArrayList<>(routes.stream().limit(MAX_ROUTES).toList());
         if (this.routes.isEmpty()) {
@@ -52,7 +82,8 @@ public class CruiseRoute {
     }
 
     public CruiseRoute copy() {
-        return new CruiseRoute(enabled, holdingPattern, hudEnabled, selectedRoute, currentIndex, startPoint, initialAltitudeReached, routes);
+        return new CruiseRoute(enabled, holdingPattern, hudEnabled, selectedRoute, currentIndex, startPoint,
+                initialAltitudeReached, loadingStage, lFirstLineCoordinate, routes);
     }
 
     public boolean isEnabled() {
@@ -116,6 +147,168 @@ public class CruiseRoute {
     public void setCurrentIndex(int currentIndex) {
         this.currentIndex = Math.max(0, currentIndex);
         clampCurrentIndex();
+    }
+
+    public int getLoadingStage() {
+        return loadingStage;
+    }
+
+    public void setLoadingStage(int loadingStage) {
+        this.loadingStage = Math.max(0, Math.min(L_STAGE_MAX, loadingStage));
+    }
+
+    public Integer getLFirstLineCoordinate() {
+        return lFirstLineCoordinate;
+    }
+
+    public void setLFirstLineCoordinate(Integer lFirstLineCoordinate) {
+        this.lFirstLineCoordinate = lFirstLineCoordinate;
+    }
+
+    public boolean isLShapedSingleMode() {
+        return getSelectedEntry().loadingMode() == RouteLoadingMode.L_SHAPED_SINGLE;
+    }
+
+    public boolean shouldUseLShaped(double currentX, double currentZ) {
+        if (!isLShapedSingleMode()) {
+            return false;
+        }
+        Waypoint target = getTarget();
+        Waypoint start = currentIndex <= 0 ? startPoint : getPreviousWaypoint();
+        if (target == null || start == null) {
+            return false;
+        }
+        double dx = target.x() - start.x();
+        double dz = target.z() - start.z();
+        return dx != 0.0d && dz != 0.0d
+                && Math.hypot(dx, dz) > L_SHAPED_MIN_HORIZONTAL_DISTANCE;
+    }
+
+    private Waypoint lStartPoint() {
+        return currentIndex <= 0 ? startPoint : getPreviousWaypoint();
+    }
+
+    public boolean isLFirstAxisX() {
+        Waypoint start = lStartPoint();
+        Waypoint target = getTarget();
+        return start != null && target != null
+                && Math.abs(target.x() - start.x()) <= Math.abs(target.z() - start.z());
+    }
+
+    public int lFirstAxisSign() {
+        Waypoint start = lStartPoint();
+        Waypoint target = getTarget();
+        if (start == null || target == null) {
+            return 1;
+        }
+        int delta = isLFirstAxisX() ? target.x() - start.x() : target.z() - start.z();
+        return delta == 0 ? 1 : Integer.signum(delta);
+    }
+
+    public int lSecondAxisSign() {
+        Waypoint start = lStartPoint();
+        Waypoint target = getTarget();
+        if (start == null || target == null) {
+            return 1;
+        }
+        int delta = isLFirstAxisX() ? target.z() - start.z() : target.x() - start.x();
+        return delta == 0 ? 1 : Integer.signum(delta);
+    }
+
+    private static int chunkCenter(int block) {
+        return Math.floorDiv(block, 16) * 16 + 8;
+    }
+
+    private static int selectedStartLineCenter(int block) {
+        // The nearest line minimizes the time from takeoff to the first
+        // usable one-wide route. A low-angle crossing is handled by the
+        // controller and snaps the aircraft onto this line.
+        return chunkCenter(block);
+    }
+
+    private Waypoint lCornerTarget() {
+        Waypoint start = lStartPoint();
+        Waypoint target = getTarget();
+        if (start == null || target == null) {
+            return target;
+        }
+        int lateralLine = lFirstLineCoordinate != null
+                ? lFirstLineCoordinate
+                : isLFirstAxisX()
+                ? selectedStartLineCenter(start.z())
+                : selectedStartLineCenter(start.x());
+        int targetXCenter = chunkCenter(target.x());
+        int targetZCenter = chunkCenter(target.z());
+        if (isLFirstAxisX()) {
+            return new Waypoint(targetXCenter, lateralLine, target.altitude(), target.name());
+        }
+        return new Waypoint(lateralLine, targetZCenter, target.altitude(), target.name());
+    }
+
+    private Waypoint lFinalLineTarget() {
+        Waypoint target = getTarget();
+        if (target == null) {
+            return null;
+        }
+        if (isLFirstAxisX()) {
+            return new Waypoint(chunkCenter(target.x()), target.z(), target.altitude(), target.name());
+        }
+        return new Waypoint(target.x(), chunkCenter(target.z()), target.altitude(), target.name());
+    }
+
+    /**
+     * Returns the geometric target for the current L state. Stage 0 is a
+     * free axis-only launch; stages 1-2 capture and follow the first leg;
+     * stage 3 turns at the corner; stage 4 follows the final axis line.
+     */
+    public Waypoint getLNavigationTarget(double currentX, double currentZ) {
+        Waypoint target = getTarget();
+        if (target == null) {
+            return null;
+        }
+        if (loadingStage == L_STAGE_AXIS_ALIGN) {
+            if (isLFirstAxisX()) {
+                return new Waypoint(target.x(), (int) Math.floor(currentZ), target.altitude(), target.name());
+            }
+            return new Waypoint((int) Math.floor(currentX), target.z(), target.altitude(), target.name());
+        }
+        if (loadingStage <= L_STAGE_CORNER_TURN) {
+            return lCornerTarget();
+        }
+        return lFinalLineTarget();
+    }
+
+    /** Returns the first center line in the lateral travel direction at or beyond the exact distance. */
+    public int selectLFirstLine(double currentX, double currentZ, double requiredDistance) {
+        double current = isLFirstAxisX() ? currentZ : currentX;
+        int direction = lSecondAxisSign();
+        int line = chunkCenter((int) Math.floor(current));
+        double distance = Math.max(0.0d, requiredDistance);
+        if (direction > 0) {
+            while (line - current < distance) {
+                line += 16;
+            }
+        } else {
+            while (current - line < distance) {
+                line -= 16;
+            }
+        }
+        return line;
+    }
+
+    /**
+     * Returns the steering/preload target for the current leg. L mode is only
+     * activated for genuinely long legs; short legs remain direct flights.
+     */
+    public Waypoint getNavigationTarget(double currentX, double currentZ) {
+        Waypoint target = getTarget();
+        if (target == null || !isLShapedSingleMode()) {
+            return target;
+        }
+        if (!shouldUseLShaped(currentX, currentZ)) {
+            return target;
+        }
+        return getLNavigationTarget(currentX, currentZ);
     }
 
     public boolean isInitialAltitudeReached() {
@@ -318,6 +511,8 @@ public class CruiseRoute {
 
     public void advance() {
         currentIndex++;
+        loadingStage = 0;
+        lFirstLineCoordinate = null;
         if (currentIndex >= getSelectedEntry().waypoints().size()) {
             holdingPattern = true;
             currentIndex = Math.max(0, getSelectedEntry().waypoints().size() - 1);
@@ -330,6 +525,8 @@ public class CruiseRoute {
         holdingPattern = false;
         startPoint = null;
         initialAltitudeReached = false;
+        loadingStage = 0;
+        lFirstLineCoordinate = null;
         if (getSelectedEntry().waypoints().isEmpty()) {
             enabled = false;
         }
@@ -348,6 +545,8 @@ public class CruiseRoute {
         currentIndex = source.currentIndex;
         startPoint = source.startPoint;
         initialAltitudeReached = source.initialAltitudeReached;
+        loadingStage = source.loadingStage;
+        lFirstLineCoordinate = source.lFirstLineCoordinate;
         clampCurrentIndex();
     }
 
@@ -363,6 +562,8 @@ public class CruiseRoute {
         currentIndex = source.currentIndex;
         startPoint = source.startPoint;
         initialAltitudeReached = source.initialAltitudeReached;
+        loadingStage = source.loadingStage;
+        lFirstLineCoordinate = source.lFirstLineCoordinate;
         clampCurrentIndex();
     }
 
@@ -370,11 +571,25 @@ public class CruiseRoute {
         if (source == null || source.selectedRoute != selectedRoute) {
             return false;
         }
-        return mergeProgressForward(source.currentIndex, source.holdingPattern, source.initialAltitudeReached, source.startPoint);
+        return mergeProgressForward(source.currentIndex, source.holdingPattern, source.initialAltitudeReached,
+                source.loadingStage, source.startPoint, source.lFirstLineCoordinate);
     }
 
     public boolean mergeProgressForward(int sourceCurrentIndex, boolean sourceHoldingPattern,
                                         boolean sourceInitialAltitudeReached, Waypoint sourceStartPoint) {
+        return mergeProgressForward(sourceCurrentIndex, sourceHoldingPattern, sourceInitialAltitudeReached, 0, sourceStartPoint);
+    }
+
+    public boolean mergeProgressForward(int sourceCurrentIndex, boolean sourceHoldingPattern,
+                                        boolean sourceInitialAltitudeReached, int sourceLoadingStage,
+                                        Waypoint sourceStartPoint) {
+        return mergeProgressForward(sourceCurrentIndex, sourceHoldingPattern, sourceInitialAltitudeReached,
+                sourceLoadingStage, sourceStartPoint, null);
+    }
+
+    public boolean mergeProgressForward(int sourceCurrentIndex, boolean sourceHoldingPattern,
+                                        boolean sourceInitialAltitudeReached, int sourceLoadingStage,
+                                        Waypoint sourceStartPoint, Integer sourceLFirstLineCoordinate) {
         boolean changed = false;
         int waypointCount = getSelectedEntry().waypoints().size();
         if (waypointCount > 0 && sourceCurrentIndex >= 0 && sourceCurrentIndex < waypointCount) {
@@ -392,6 +607,15 @@ public class CruiseRoute {
         }
         if (sourceInitialAltitudeReached && !initialAltitudeReached) {
             initialAltitudeReached = true;
+            changed = true;
+        }
+        if (sourceCurrentIndex == currentIndex && sourceLoadingStage > loadingStage) {
+            loadingStage = Math.min(L_STAGE_MAX, sourceLoadingStage);
+            changed = true;
+        }
+        if (sourceCurrentIndex == currentIndex && sourceLFirstLineCoordinate != null
+                && !sourceLFirstLineCoordinate.equals(lFirstLineCoordinate)) {
+            lFirstLineCoordinate = sourceLFirstLineCoordinate;
             changed = true;
         }
         if (startPoint == null && sourceStartPoint != null) {
@@ -430,6 +654,11 @@ public class CruiseRoute {
             startPoint.write(buffer);
         }
         buffer.writeBoolean(initialAltitudeReached);
+        buffer.writeInt(loadingStage);
+        buffer.writeBoolean(lFirstLineCoordinate != null);
+        if (lFirstLineCoordinate != null) {
+            buffer.writeInt(lFirstLineCoordinate);
+        }
         buffer.writeInt(routes.size());
         for (RouteEntry route : routes) {
             route.write(buffer);
@@ -444,15 +673,19 @@ public class CruiseRoute {
         int currentIndex = buffer.readInt();
         Waypoint startPoint = buffer.readBoolean() ? Waypoint.read(buffer) : null;
         boolean initialAltitudeReached = buffer.readBoolean();
+        int loadingStage = buffer.readInt();
+        Integer lFirstLineCoordinate = buffer.readBoolean() ? buffer.readInt() : null;
         int size = buffer.readInt();
-        List<RouteEntry> routes = new ArrayList<>(Math.min(Math.max(size, 0), MAX_ROUTES));
+        if (size < 0 || size > MAX_ROUTES) {
+            throw new IllegalArgumentException("Cruise route count exceeds protocol limit: " + size);
+        }
+        List<RouteEntry> routes = new ArrayList<>(size);
         for (int i = 0; i < size; i++) {
             RouteEntry route = RouteEntry.read(buffer);
-            if (i < MAX_ROUTES) {
-                routes.add(route);
-            }
+            routes.add(route);
         }
-        return new CruiseRoute(enabled, holdingPattern, hudEnabled, selectedRoute, currentIndex, startPoint, initialAltitudeReached, routes);
+        return new CruiseRoute(enabled, holdingPattern, hudEnabled, selectedRoute, currentIndex, startPoint,
+                initialAltitudeReached, loadingStage, lFirstLineCoordinate, routes);
     }
 
     public CompoundTag toTag() {
@@ -466,6 +699,10 @@ public class CruiseRoute {
             tag.put("StartPoint", startPoint.toTag());
         }
         tag.putBoolean("InitialAltitudeReached", initialAltitudeReached);
+        tag.putInt("LoadingStage", loadingStage);
+        if (lFirstLineCoordinate != null) {
+            tag.putInt("LFirstLineCoordinate", lFirstLineCoordinate);
+        }
         ListTag list = new ListTag();
         for (RouteEntry route : routes) {
             list.add(route.toTag());
@@ -494,6 +731,8 @@ public class CruiseRoute {
                 tag.contains("InitialAltitudeReached", Tag.TAG_BYTE)
                         ? tag.getBoolean("InitialAltitudeReached")
                         : tag.getInt("CurrentIndex") > 0 || tag.getBoolean("HoldingPattern"),
+                tag.contains("LoadingStage", Tag.TAG_INT) ? tag.getInt("LoadingStage") : 0,
+                tag.contains("LFirstLineCoordinate", Tag.TAG_INT) ? tag.getInt("LFirstLineCoordinate") : null,
                 routes
         );
     }
@@ -598,14 +837,62 @@ public class CruiseRoute {
         }
     }
 
-    public record RouteEntry(String name, int defaultAltitude, CruiseMode cruiseMode, LandingMode landingMode,
+    public enum RouteLoadingMode {
+        VANILLA(0, "vanilla"),
+        THREE_WIDE(1, "three_wide"),
+        L_SHAPED_SINGLE(2, "l_shaped_single");
+
+        private final int id;
+        private final String serializedName;
+
+        RouteLoadingMode(int id, String serializedName) {
+            this.id = id;
+            this.serializedName = serializedName;
+        }
+
+        public int id() {
+            return id;
+        }
+
+        public String serializedName() {
+            return serializedName;
+        }
+
+        public static RouteLoadingMode byId(int id) {
+            for (RouteLoadingMode mode : values()) {
+                if (mode.id == id) {
+                    return mode;
+                }
+            }
+            return THREE_WIDE;
+        }
+
+        public static RouteLoadingMode byName(String name) {
+            for (RouteLoadingMode mode : values()) {
+                if (mode.serializedName.equals(name)) {
+                    return mode;
+                }
+            }
+            return THREE_WIDE;
+        }
+    }
+
+    public record RouteEntry(String name, int defaultAltitude, CruiseMode cruiseMode, RouteLoadingMode loadingMode,
+                             LandingMode landingMode,
                              Integer landingAltitude, List<Waypoint> waypoints) {
         public static RouteEntry empty(String name) {
-            return new RouteEntry(name, 200, CruiseMode.SUPER_ACCELERATION, LandingMode.HOLDING_PATTERN, null, List.of());
+            return new RouteEntry(name, 200, CruiseMode.SUPER_ACCELERATION, RouteLoadingMode.THREE_WIDE,
+                    LandingMode.HOLDING_PATTERN, null, List.of());
         }
 
         public RouteEntry(String name, int defaultAltitude, LandingMode landingMode, Integer landingAltitude, List<Waypoint> waypoints) {
-            this(name, defaultAltitude, CruiseMode.SUPER_ACCELERATION, landingMode, landingAltitude, waypoints);
+            this(name, defaultAltitude, CruiseMode.SUPER_ACCELERATION, RouteLoadingMode.THREE_WIDE,
+                    landingMode, landingAltitude, waypoints);
+        }
+
+        public RouteEntry(String name, int defaultAltitude, CruiseMode cruiseMode, LandingMode landingMode,
+                          Integer landingAltitude, List<Waypoint> waypoints) {
+            this(name, defaultAltitude, cruiseMode, RouteLoadingMode.THREE_WIDE, landingMode, landingAltitude, waypoints);
         }
 
         public RouteEntry {
@@ -614,6 +901,10 @@ public class CruiseRoute {
             }
             if (cruiseMode == null) {
                 cruiseMode = CruiseMode.SUPER_ACCELERATION;
+            }
+            if (loadingMode == null) {
+                // Old route NBT did not contain a loading mode; preserve its three-wide behavior.
+                loadingMode = RouteLoadingMode.THREE_WIDE;
             }
             if (landingMode == null) {
                 landingMode = LandingMode.HOLDING_PATTERN;
@@ -632,6 +923,7 @@ public class CruiseRoute {
             buffer.writeUtf(name, 64);
             buffer.writeInt(defaultAltitude);
             buffer.writeInt(cruiseMode.id());
+            buffer.writeInt(loadingMode.id());
             buffer.writeInt(landingMode.id());
             buffer.writeBoolean(landingAltitude != null);
             if (landingAltitude != null) {
@@ -647,17 +939,19 @@ public class CruiseRoute {
             String name = buffer.readUtf(64);
             int defaultAltitude = buffer.readInt();
             CruiseMode cruiseMode = CruiseMode.byId(buffer.readInt());
+            RouteLoadingMode loadingMode = RouteLoadingMode.byId(buffer.readInt());
             LandingMode landingMode = LandingMode.byId(buffer.readInt());
             Integer landingAltitude = buffer.readBoolean() ? buffer.readInt() : null;
             int size = buffer.readInt();
-            List<Waypoint> waypoints = new ArrayList<>(Math.min(Math.max(size, 0), MAX_WAYPOINTS));
+            if (size < 0 || size > MAX_WAYPOINTS) {
+                throw new IllegalArgumentException("Cruise waypoint count exceeds protocol limit: " + size);
+            }
+            List<Waypoint> waypoints = new ArrayList<>(size);
             for (int i = 0; i < size; i++) {
                 Waypoint waypoint = Waypoint.read(buffer);
-                if (i < MAX_WAYPOINTS) {
-                    waypoints.add(waypoint);
-                }
+                waypoints.add(waypoint);
             }
-            return new RouteEntry(name, defaultAltitude, cruiseMode, landingMode, landingAltitude, waypoints);
+            return new RouteEntry(name, defaultAltitude, cruiseMode, loadingMode, landingMode, landingAltitude, waypoints);
         }
 
         public CompoundTag toTag() {
@@ -665,6 +959,7 @@ public class CruiseRoute {
             tag.putString("Name", name);
             tag.putInt("DefaultAltitude", defaultAltitude);
             tag.putString("CruiseMode", cruiseMode.serializedName());
+            tag.putString("LoadingMode", loadingMode.serializedName());
             tag.putString("LandingMode", landingMode.serializedName());
             if (landingAltitude != null) {
                 tag.putInt("LandingAltitude", landingAltitude);
@@ -688,6 +983,9 @@ public class CruiseRoute {
             CruiseMode cruiseMode = tag.contains("CruiseMode", Tag.TAG_STRING)
                     ? CruiseMode.byName(tag.getString("CruiseMode"))
                     : CruiseMode.SUPER_ACCELERATION;
+            RouteLoadingMode loadingMode = tag.contains("LoadingMode", Tag.TAG_STRING)
+                    ? RouteLoadingMode.byName(tag.getString("LoadingMode"))
+                    : RouteLoadingMode.THREE_WIDE;
             LandingMode landingMode = tag.contains("LandingMode", Tag.TAG_STRING)
                     ? LandingMode.byName(tag.getString("LandingMode"))
                     : LandingMode.HOLDING_PATTERN;
@@ -699,7 +997,7 @@ public class CruiseRoute {
                     waypoints.set(waypoints.size() - 1, new Waypoint(finalWaypoint.x(), finalWaypoint.z(), null, finalWaypoint.name()));
                 }
             }
-            return new RouteEntry(name, defaultAltitude, cruiseMode, landingMode, landingAltitude, waypoints);
+            return new RouteEntry(name, defaultAltitude, cruiseMode, loadingMode, landingMode, landingAltitude, waypoints);
         }
     }
 

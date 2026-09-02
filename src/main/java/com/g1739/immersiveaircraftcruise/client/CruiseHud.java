@@ -15,13 +15,19 @@ import net.minecraft.client.gui.GuiGraphics;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.phys.Vec3;
 import net.minecraftforge.client.gui.overlay.ForgeGui;
 
 import java.util.HashMap;
 import java.util.Map;
 
 public final class CruiseHud {
-    private static final Map<Integer, CruiseFuelInfo> FUEL_INFO = new HashMap<>();
+    private static final double LOCAL_SPEED_MAX = 512.0d;
+    private static final Map<Integer, FuelSnapshot> FUEL_INFO = new HashMap<>();
+    private static final Map<Integer, PositionSample> LOCAL_SPEED_SAMPLES = new HashMap<>();
+
+    private record FuelSnapshot(CruiseFuelInfo info, long clientGameTime) {
+    }
 
     private CruiseHud() {
     }
@@ -53,12 +59,17 @@ public final class CruiseHud {
     }
 
     public static void renderHudAt(GuiGraphics graphics, Font font, VehicleEntity vehicle, CruiseRoute route, int x, int y) {
-        CruiseFuelInfo fuelInfo = FUEL_INFO.getOrDefault(vehicle.getId(), CruiseFuelInfo.EMPTY);
-        renderHudAt(graphics, font, vehicle, fuelInfo.boosting(), route, x, y);
+        CruiseFuelInfo fuelInfo = fuelInfoForDisplay(vehicle);
+        renderHud(graphics, font, vehicle, fuelInfo.boosting(), route, fuelInfo, x, y);
     }
 
     public static void renderHudAt(GuiGraphics graphics, Font font, VehicleEntity vehicle, boolean boosting,
                                    CruiseRoute route, int x, int y) {
+        renderHud(graphics, font, vehicle, boosting, route, fuelInfoForDisplay(vehicle), x, y);
+    }
+
+    private static void renderHud(GuiGraphics graphics, Font font, VehicleEntity vehicle, boolean boosting,
+                                  CruiseRoute route, CruiseFuelInfo fuelInfo, int x, int y) {
         ItemStack moduleIcon = new ItemStack(CruiseItems.CRUISE_MODULE.get());
         if (boosting) {
             moduleIcon.getOrCreateTag().putBoolean(CruiseModuleData.BOOSTING_TAG, true);
@@ -66,7 +77,6 @@ public final class CruiseHud {
         graphics.renderItem(moduleIcon, x, y);
 
         int textX = x + 20;
-        CruiseFuelInfo fuelInfo = FUEL_INFO.getOrDefault(vehicle.getId(), CruiseFuelInfo.EMPTY);
         double speed = displaySpeed(vehicle, fuelInfo);
         ItemStack fuelIcon = fuelIcon(vehicle, fuelInfo);
         if (!fuelIcon.isEmpty()) {
@@ -148,6 +158,44 @@ public final class CruiseHud {
         return fuelInfo.speed();
     }
 
+    private static CruiseFuelInfo fuelInfoForDisplay(VehicleEntity vehicle) {
+        FuelSnapshot snapshot = FUEL_INFO.get(vehicle.getId());
+        CruiseFuelInfo info = snapshot == null ? CruiseFuelInfo.EMPTY : snapshot.info();
+        Minecraft minecraft = Minecraft.getInstance();
+        long now = minecraft.level == null ? -1L : minecraft.level.getGameTime();
+        int remainingTicks = info.remainingTicks();
+        if (snapshot != null && remainingTicks >= 0 && now >= snapshot.clientGameTime()) {
+            long elapsed = now - snapshot.clientGameTime();
+            remainingTicks = (int) Math.max(0L, remainingTicks - elapsed);
+        }
+
+        // Speed is safe to derive locally and must not stop changing when a
+        // delayed server fuel packet is waiting behind route chunk work.
+        double localSpeed = localSpeed(vehicle, now);
+        float speed = info.speed();
+        if (Double.isFinite(localSpeed) && localSpeed > 0.05d) {
+            speed = (float) Math.min(LOCAL_SPEED_MAX, localSpeed);
+        }
+        return new CruiseFuelInfo(info.amountText(), remainingTicks, info.icon(), speed, info.boosting());
+    }
+
+    private static double localSpeed(VehicleEntity vehicle, long clientGameTime) {
+        double velocitySpeed = vehicle.getDeltaMovement().length() * 20.0d;
+        if (clientGameTime < 0L) {
+            return velocitySpeed;
+        }
+        PositionSample previous = LOCAL_SPEED_SAMPLES.get(vehicle.getId());
+        PositionSample current = new PositionSample(vehicle.position(), clientGameTime);
+        if (previous == null || previous.clientGameTime() == clientGameTime) {
+            LOCAL_SPEED_SAMPLES.put(vehicle.getId(), current);
+            return velocitySpeed;
+        }
+        LOCAL_SPEED_SAMPLES.put(vehicle.getId(), current);
+        long elapsedTicks = Math.max(1L, clientGameTime - previous.clientGameTime());
+        double sampledSpeed = vehicle.position().distanceTo(previous.position()) * 20.0d / elapsedTicks;
+        return Math.max(velocitySpeed, sampledSpeed);
+    }
+
     private static String formatPoint(CruiseRoute.Waypoint waypoint) {
         if (waypoint == null) {
             return "-";
@@ -184,7 +232,19 @@ public final class CruiseHud {
     }
 
     public static void setFuelInfo(int entityId, CruiseFuelInfo fuelInfo) {
-        FUEL_INFO.put(entityId, fuelInfo);
+        Minecraft minecraft = Minecraft.getInstance();
+        long clientGameTime = minecraft.level == null ? -1L : minecraft.level.getGameTime();
+        FUEL_INFO.put(entityId, new FuelSnapshot(
+                fuelInfo == null ? CruiseFuelInfo.EMPTY : fuelInfo,
+                clientGameTime));
+    }
+
+    public static void clearFuelInfo() {
+        FUEL_INFO.clear();
+        LOCAL_SPEED_SAMPLES.clear();
+    }
+
+    private record PositionSample(Vec3 position, long clientGameTime) {
     }
 
 }

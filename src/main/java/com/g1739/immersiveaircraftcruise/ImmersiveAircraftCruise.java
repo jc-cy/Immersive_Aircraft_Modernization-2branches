@@ -1,5 +1,6 @@
 package com.g1739.immersiveaircraftcruise;
 
+import com.g1739.immersiveaircraftcruise.cruise.CruiseChunkSendScheduler;
 import com.g1739.immersiveaircraftcruise.network.CruiseNetwork;
 import com.mojang.logging.LogUtils;
 import net.minecraftforge.eventbus.api.IEventBus;
@@ -17,5 +18,6 @@ public class ImmersiveAircraftCruise {
         CruiseItems.register(modBus);
         CruiseTabs.register(modBus);
         CruiseNetwork.register();
+        CruiseChunkSendScheduler.register();
     }
 }

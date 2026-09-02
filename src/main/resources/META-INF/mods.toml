@@ -74,3 +74,6 @@ side = "BOTH"
 
 [[mixins]]
 config = "immersive_aircraft_cruise.mixins.json"
+
+[[mixins]]
+config = "immersive_aircraft_cruise.embeddium.mixins.json"
