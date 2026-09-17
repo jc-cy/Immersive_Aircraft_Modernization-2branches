@@ -12,6 +12,8 @@ public class CruiseRoute {
     public static final int MAX_ROUTES = 16;
     public static final int MAX_WAYPOINTS = 32;
     public static final double L_SHAPED_MIN_HORIZONTAL_DISTANCE = 512.0d;
+    /** An offset below one chunk is treated as an already-determined center line. */
+    public static final double L_SHAPED_MIN_SHORT_AXIS_DISTANCE = 16.0d;
     public static final double L_FINAL_LANDING_HANDOFF_DISTANCE = 512.0d;
     public static final double LANDING_ALTITUDE_INPUT_OFFSET = 0.0d;
 
@@ -96,6 +98,9 @@ public class CruiseRoute {
 
     public void stopNavigation() {
         enabled = false;
+        // A later navigation run must select its lateral line from the
+        // current takeoff context; keep the route and progress intact.
+        lFirstLineCoordinate = null;
     }
 
     public void resume(Waypoint startPointIfMissing) {
@@ -169,19 +174,46 @@ public class CruiseRoute {
         return getSelectedEntry().loadingMode() == RouteLoadingMode.L_SHAPED_SINGLE;
     }
 
+    /**
+     * Returns whether the current waypoint leg needs the five-stage L route.
+     *
+     * The classification is intentionally based on the fixed geometry of the
+     * current leg, not on the remaining vector every tick. Once a leg is
+     * classified, it must not silently switch between L and direct mode while
+     * the aircraft is travelling along it; the controller and the preload
+     * scheduler both consume this result.
+     */
     public boolean shouldUseLShaped(double currentX, double currentZ) {
         if (!isLShapedSingleMode()) {
             return false;
         }
+        Waypoint start = lStartPoint();
         Waypoint target = getTarget();
-        Waypoint start = currentIndex <= 0 ? startPoint : getPreviousWaypoint();
-        if (target == null || start == null) {
+        if (start == null || target == null) {
             return false;
         }
         double dx = target.x() - start.x();
         double dz = target.z() - start.z();
-        return dx != 0.0d && dz != 0.0d
-                && Math.hypot(dx, dz) > L_SHAPED_MIN_HORIZONTAL_DISTANCE;
+        double shortAxisDistance = Math.min(Math.abs(dx), Math.abs(dz));
+        return isLongLRouteCandidate()
+                && dx != 0.0d
+                && dz != 0.0d
+                && shortAxisDistance >= L_SHAPED_MIN_SHORT_AXIS_DISTANCE;
+    }
+
+    /**
+     * True for a long L-mode leg, including an axis-aligned leg whose short
+     * axis is already zero. Such a leg still needs the endpoint chunk's long
+     * axis center line, but it does not need the L five-stage turn.
+     */
+    public boolean isLongLRouteCandidate() {
+        Waypoint target = getTarget();
+        Waypoint start = lStartPoint();
+        if (start == null || target == null || !isLShapedSingleMode()) {
+            return false;
+        }
+        return Math.hypot(target.x() - start.x(), target.z() - start.z())
+                > L_SHAPED_MIN_HORIZONTAL_DISTANCE;
     }
 
     private Waypoint lStartPoint() {
@@ -245,6 +277,14 @@ public class CruiseRoute {
         return new Waypoint(lateralLine, targetZCenter, target.altitude(), target.name());
     }
 
+    public Waypoint getLCornerTarget() {
+        return lCornerTarget();
+    }
+
+    public Waypoint getLFinalLineTarget() {
+        return lFinalLineTarget();
+    }
+
     private Waypoint lFinalLineTarget() {
         Waypoint target = getTarget();
         if (target == null) {
@@ -297,18 +337,20 @@ public class CruiseRoute {
     }
 
     /**
-     * Returns the steering/preload target for the current leg. L mode is only
-     * activated for genuinely long legs; short legs remain direct flights.
+     * Returns the steering/preload target for the current leg. A long leg
+     * whose fixed short-axis offset is below one chunk skips the L stages and
+     * uses the endpoint chunk's long-axis center line directly.
      */
     public Waypoint getNavigationTarget(double currentX, double currentZ) {
         Waypoint target = getTarget();
         if (target == null || !isLShapedSingleMode()) {
             return target;
         }
-        if (!shouldUseLShaped(currentX, currentZ)) {
-            return target;
+        boolean useLShaped = shouldUseLShaped(currentX, currentZ);
+        if (isLongLRouteCandidate() && !useLShaped) {
+            return lFinalLineTarget();
         }
-        return getLNavigationTarget(currentX, currentZ);
+        return useLShaped ? getLNavigationTarget(currentX, currentZ) : target;
     }
 
     public boolean isInitialAltitudeReached() {
@@ -821,7 +863,8 @@ public class CruiseRoute {
     public enum CruiseMode {
         SUPER_ACCELERATION(0, "super_acceleration", 1.0f, 3.0f),
         NORMAL(1, "normal", 0.2f, 0.0f),
-        ECO(2, "eco", -0.15f, -0.75f);
+        ECO(2, "eco", -0.15f, -0.75f),
+        ACCELERATION(3, "acceleration", 0.6f, 1.5f);
 
         private final int id;
         private final String serializedName;

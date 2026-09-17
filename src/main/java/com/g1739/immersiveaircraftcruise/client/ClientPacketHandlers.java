@@ -26,6 +26,8 @@ import net.minecraft.world.level.chunk.LevelChunk;
 import net.minecraft.world.entity.Entity;
 
 import java.util.List;
+import java.util.LinkedHashMap;
+import java.util.Map;
 import java.util.Queue;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.ExecutorService;
@@ -43,10 +45,16 @@ public final class ClientPacketHandlers {
     private static final int ROUTE_CLIENT_CACHE_RADIUS = 52;
     /** Match the server in-flight window so a slow client cannot grow an unbounded queue. */
     private static final int MAX_PENDING_ROUTE_CHUNKS = 32;
+    /** Entity spawn and route-state packets may cross; retain only a bounded, short-lived latest state. */
+    private static final int MAX_PENDING_ROUTE_STATES = 32;
+    private static final long PENDING_ROUTE_STATE_TTL_TICKS = 200L;
     private static final Queue<QueuedCruiseChunk> PENDING_ROUTE_CHUNKS =
             new ArrayBlockingQueue<>(MAX_PENDING_ROUTE_CHUNKS);
     private static final AtomicInteger PENDING_ROUTE_COUNT = new AtomicInteger();
     private static final AtomicLong ROUTE_SESSION = new AtomicLong();
+    private static final Map<Integer, PendingRouteState> PENDING_ROUTE_STATES = new LinkedHashMap<>();
+    private static final Map<Integer, PendingAccelerationPermit> PENDING_ACCELERATION_PERMITS = new LinkedHashMap<>();
+    private static final Map<Integer, PendingVehicleInventory> PENDING_VEHICLE_INVENTORIES = new LinkedHashMap<>();
     private static int routeApplyTick;
     private static final ExecutorService DECODE_EXECUTOR = Executors.newSingleThreadExecutor(runnable -> {
         Thread thread = new Thread(runnable, "iacruise-route-packet-decode");
@@ -107,17 +115,38 @@ public final class ClientPacketHandlers {
     }
 
     public static void clearRouteSession() {
-        ROUTE_SESSION.incrementAndGet();
-        routeApplyTick = 0;
-        while (PENDING_ROUTE_CHUNKS.poll() != null) {
-            PENDING_ROUTE_COUNT.decrementAndGet();
-        }
+        invalidateRouteStream();
+        PENDING_ROUTE_STATES.clear();
+        PENDING_ACCELERATION_PERMITS.clear();
+        PENDING_VEHICLE_INVENTORIES.clear();
         setRouteCacheRadius(false);
         CruiseHud.clearFuelInfo();
         CruiseRouteCache.close();
     }
 
+    /**
+     * Invalidates packets already in flight when navigation stops. The decode
+     * worker may finish after this method returns, so the session check in
+     * {@link #decodeCruiseChunk(CruiseRouteChunkPacket, long)} remains the
+     * authority for those late results.
+     */
+    public static void invalidateRouteStream() {
+        long session = ROUTE_SESSION.incrementAndGet();
+        routeApplyTick = 0;
+        int discarded = 0;
+        while (PENDING_ROUTE_CHUNKS.poll() != null) {
+            PENDING_ROUTE_COUNT.decrementAndGet();
+            discarded++;
+        }
+        CruiseDebug.debug(ImmersiveAircraftCruise.LOGGER,
+                "[CruiseChunks][Client] route stream invalidated: session={}, discardedQueuedPackets={}",
+                session, discarded);
+    }
+
     public static void processQueuedCruiseChunks() {
+        processPendingRouteStates();
+        processPendingAccelerationPermits();
+        processPendingVehicleInventories();
         if (++routeApplyTick < ROUTE_CLIENT_APPLY_INTERVAL_TICKS) {
             return;
         }
@@ -137,6 +166,13 @@ public final class ClientPacketHandlers {
         if (minecraft.level == null) {
             return;
         }
+        // Apply stream/session state immediately even when the entity spawn packet
+        // is still in flight; otherwise a disabled route could leave stale chunks
+        // active until the vehicle eventually appears.
+        if (!route.isEnabled()) {
+            invalidateRouteStream();
+        }
+        setRouteCacheRadius(route.isEnabled());
         Entity entity = minecraft.level.getEntity(entityId);
         if (entityId < 0 || (entity instanceof VehicleEntity && entity instanceof CruiseVehicleAccess)) {
             minecraft.setScreen(new CruiseScreen(entityId, route.copy(), readOnly));
@@ -148,8 +184,54 @@ public final class ClientPacketHandlers {
         if (minecraft.level == null) {
             return;
         }
-        setRouteCacheRadius(route.isEnabled());
         Entity entity = minecraft.level.getEntity(entityId);
+        if (!(entity instanceof VehicleEntity) || !(entity instanceof CruiseVehicleAccess)) {
+            if (entity == null) {
+                if (PENDING_ROUTE_STATES.size() >= MAX_PENDING_ROUTE_STATES
+                        && !PENDING_ROUTE_STATES.containsKey(entityId)) {
+                    Integer eldest = PENDING_ROUTE_STATES.keySet().iterator().next();
+                    PENDING_ROUTE_STATES.remove(eldest);
+                }
+                PENDING_ROUTE_STATES.put(entityId,
+                        new PendingRouteState(route.copy(), minecraft.level.getGameTime()));
+                CruiseDebug.debug(ImmersiveAircraftCruise.LOGGER,
+                        "[CruiseChunks][Client] queued route state until entity spawn: vehicleId={}, pending={}",
+                        entityId, PENDING_ROUTE_STATES.size());
+            } else {
+                ImmersiveAircraftCruise.LOGGER.warn(
+                        "[CruiseChunks][Client] route state sync ignored: vehicleId={}, entity={}",
+                        entityId, entity.getClass().getSimpleName());
+            }
+            return;
+        }
+        applyCruiseRoute(minecraft, entityId, route, entity);
+    }
+
+    private static void processPendingRouteStates() {
+        Minecraft minecraft = Minecraft.getInstance();
+        if (minecraft.level == null || PENDING_ROUTE_STATES.isEmpty()) {
+            return;
+        }
+        long now = minecraft.level.getGameTime();
+        java.util.Iterator<Map.Entry<Integer, PendingRouteState>> iterator =
+                PENDING_ROUTE_STATES.entrySet().iterator();
+        while (iterator.hasNext()) {
+            Map.Entry<Integer, PendingRouteState> entry = iterator.next();
+            Entity entity = minecraft.level.getEntity(entry.getKey());
+            if (entity instanceof VehicleEntity && entity instanceof CruiseVehicleAccess) {
+                PendingRouteState pending = entry.getValue();
+                iterator.remove();
+                applyCruiseRoute(minecraft, entry.getKey(), pending.route(), entity);
+            } else if (now - entry.getValue().queuedTick() >= PENDING_ROUTE_STATE_TTL_TICKS) {
+                iterator.remove();
+                CruiseDebug.debug(ImmersiveAircraftCruise.LOGGER,
+                        "[CruiseChunks][Client] expired pending route state: vehicleId={}, ageTicks={}",
+                        entry.getKey(), now - entry.getValue().queuedTick());
+            }
+        }
+    }
+
+    private static void applyCruiseRoute(Minecraft minecraft, int entityId, CruiseRoute route, Entity entity) {
         if (entity instanceof VehicleEntity && entity instanceof CruiseVehicleAccess access) {
             CruiseRoute previous = access.iacruise$getRoute();
             CruiseRoute synced = route.copy();
@@ -170,14 +252,19 @@ public final class ClientPacketHandlers {
                 CruiseController.stopNavigationEffects((VehicleEntity) entity);
                 CruiseController.clearCruiseInputs((VehicleEntity) entity);
             }
-        } else {
-            ImmersiveAircraftCruise.LOGGER.warn(
-                    "[CruiseChunks][Client] route state sync ignored: vehicleId={}, entity={}",
-                    entityId, entity == null ? "null" : entity.getClass().getSimpleName());
         }
         if (minecraft.screen instanceof CruiseScreen screen && screen.isForEntity(entityId)) {
             screen.updateRuntime(route);
         }
+    }
+
+    private record PendingRouteState(CruiseRoute route, long queuedTick) {
+    }
+
+    private record PendingAccelerationPermit(boolean permitted, long queuedTick) {
+    }
+
+    private record PendingVehicleInventory(List<SyncVehicleInventoryPacket.Entry> entries, long queuedTick) {
     }
 
     private static void setRouteCacheRadius(boolean routeEnabled) {
@@ -220,15 +307,97 @@ public final class ClientPacketHandlers {
                 Thread.currentThread().getName());
     }
 
+    public static void updateCruiseAccelerationPermit(int entityId, boolean permitted) {
+        Minecraft minecraft = Minecraft.getInstance();
+        if (minecraft.level == null) {
+            return;
+        }
+        Entity entity = minecraft.level.getEntity(entityId);
+        if (entity instanceof VehicleEntity vehicle) {
+            CruiseController.updateClientAccelerationPermit(vehicle, permitted);
+        } else if (entity == null) {
+            if (PENDING_ACCELERATION_PERMITS.size() >= MAX_PENDING_ROUTE_STATES
+                    && !PENDING_ACCELERATION_PERMITS.containsKey(entityId)) {
+                Integer eldest = PENDING_ACCELERATION_PERMITS.keySet().iterator().next();
+                PENDING_ACCELERATION_PERMITS.remove(eldest);
+            }
+            PENDING_ACCELERATION_PERMITS.put(entityId,
+                    new PendingAccelerationPermit(permitted, minecraft.level.getGameTime()));
+        }
+    }
+
+    private static void processPendingAccelerationPermits() {
+        Minecraft minecraft = Minecraft.getInstance();
+        if (minecraft.level == null || PENDING_ACCELERATION_PERMITS.isEmpty()) {
+            return;
+        }
+        long now = minecraft.level.getGameTime();
+        java.util.Iterator<Map.Entry<Integer, PendingAccelerationPermit>> iterator =
+                PENDING_ACCELERATION_PERMITS.entrySet().iterator();
+        while (iterator.hasNext()) {
+            Map.Entry<Integer, PendingAccelerationPermit> entry = iterator.next();
+            Entity entity = minecraft.level.getEntity(entry.getKey());
+            if (entity instanceof VehicleEntity vehicle) {
+                iterator.remove();
+                CruiseController.updateClientAccelerationPermit(vehicle, entry.getValue().permitted());
+            } else if (now - entry.getValue().queuedTick() >= PENDING_ROUTE_STATE_TTL_TICKS) {
+                iterator.remove();
+            }
+        }
+    }
+
     public static void updateVehicleInventory(int entityId, List<SyncVehicleInventoryPacket.Entry> entries) {
         Minecraft minecraft = Minecraft.getInstance();
         if (minecraft.level == null) {
             return;
         }
         Entity entity = minecraft.level.getEntity(entityId);
-        if (!(entity instanceof InventoryVehicleEntity vehicle)) {
+        if (entity instanceof InventoryVehicleEntity vehicle) {
+            applyVehicleInventory(vehicle, entries);
+            CruiseDebug.debug(ImmersiveAircraftCruise.LOGGER,
+                    "[CruiseChunks][Client] vehicle inventory sync applied: vehicleId={}, entries={}",
+                    entityId, entries.size());
             return;
         }
+        if (entity == null) {
+            if (PENDING_VEHICLE_INVENTORIES.size() >= MAX_PENDING_ROUTE_STATES
+                    && !PENDING_VEHICLE_INVENTORIES.containsKey(entityId)) {
+                Integer eldest = PENDING_VEHICLE_INVENTORIES.keySet().iterator().next();
+                PENDING_VEHICLE_INVENTORIES.remove(eldest);
+            }
+            PENDING_VEHICLE_INVENTORIES.put(entityId,
+                    new PendingVehicleInventory(List.copyOf(entries), minecraft.level.getGameTime()));
+            CruiseDebug.debug(ImmersiveAircraftCruise.LOGGER,
+                    "[CruiseChunks][Client] queued vehicle inventory until entity spawn: vehicleId={}, entries={}, pending={}",
+                    entityId, entries.size(), PENDING_VEHICLE_INVENTORIES.size());
+        }
+    }
+
+    private static void processPendingVehicleInventories() {
+        Minecraft minecraft = Minecraft.getInstance();
+        if (minecraft.level == null || PENDING_VEHICLE_INVENTORIES.isEmpty()) {
+            return;
+        }
+        long now = minecraft.level.getGameTime();
+        java.util.Iterator<Map.Entry<Integer, PendingVehicleInventory>> iterator =
+                PENDING_VEHICLE_INVENTORIES.entrySet().iterator();
+        while (iterator.hasNext()) {
+            Map.Entry<Integer, PendingVehicleInventory> entry = iterator.next();
+            Entity entity = minecraft.level.getEntity(entry.getKey());
+            if (entity instanceof InventoryVehicleEntity vehicle) {
+                iterator.remove();
+                applyVehicleInventory(vehicle, entry.getValue().entries());
+                CruiseDebug.debug(ImmersiveAircraftCruise.LOGGER,
+                        "[CruiseChunks][Client] applied pending vehicle inventory: vehicleId={}, entries={}",
+                        entry.getKey(), entry.getValue().entries().size());
+            } else if (now - entry.getValue().queuedTick() >= PENDING_ROUTE_STATE_TTL_TICKS) {
+                iterator.remove();
+            }
+        }
+    }
+
+    private static void applyVehicleInventory(InventoryVehicleEntity vehicle,
+                                               List<SyncVehicleInventoryPacket.Entry> entries) {
         int size = vehicle.getInventory().getContainerSize();
         for (SyncVehicleInventoryPacket.Entry entry : entries) {
             if (entry.slot() >= 0 && entry.slot() < size) {

@@ -54,7 +54,9 @@ public abstract class VehicleEntityMixin implements CruiseVehicleAccess {
 
     @Inject(method = {"tick", "m_8119_"}, at = @At("TAIL"), remap = false)
     private void immersive_aircraft_cruise$afterTick(CallbackInfo ci) {
-        CruiseController.serverProgressTick((VehicleEntity) (Object) this);
+        VehicleEntity vehicle = (VehicleEntity) (Object) this;
+        CruiseController.serverProgressTick(vehicle);
+        CruiseController.synchronizeCruiseMovement(vehicle, "vehicle-tick");
     }
 
     @Inject(method = {"tick", "m_8119_"}, at = @At(value = "INVOKE", target = "Limmersive_aircraft/entity/VehicleEntity;updateController()V"), remap = false)

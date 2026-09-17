@@ -647,8 +647,12 @@ public class CruiseScreen extends Screen {
     }
 
     private CruiseRoute.CruiseMode nextCruiseMode() {
-        CruiseRoute.CruiseMode[] modes = CruiseRoute.CruiseMode.values();
-        return modes[(effectiveCruiseMode().ordinal() + 1) % modes.length];
+        return switch (effectiveCruiseMode()) {
+            case NORMAL -> CruiseRoute.CruiseMode.ACCELERATION;
+            case ACCELERATION -> CruiseRoute.CruiseMode.SUPER_ACCELERATION;
+            case SUPER_ACCELERATION -> CruiseRoute.CruiseMode.ECO;
+            case ECO -> CruiseRoute.CruiseMode.NORMAL;
+        };
     }
 
     private CruiseRoute.CruiseMode effectiveCruiseMode() {
@@ -850,7 +854,8 @@ public class CruiseScreen extends Screen {
 
     private int cruiseModeTextColor() {
         return switch (effectiveCruiseMode()) {
-            case SUPER_ACCELERATION -> 0xFFD36A;
+            case SUPER_ACCELERATION -> 0xFF5A5A;
+            case ACCELERATION -> 0xFFD36A;
             case NORMAL -> 0x74B9FF;
             case ECO -> 0x7DFF8A;
         };

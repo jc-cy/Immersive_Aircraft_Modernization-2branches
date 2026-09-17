@@ -30,8 +30,7 @@ public abstract class ServerGamePacketListenerImplMixin {
         }
 
         double distanceBefore = player.distanceTo(vehicle);
-        vehicle.positionRider(player);
-        player.serverLevel().getChunkSource().move(player);
+        CruiseController.synchronizeCruiseMovement(vehicle, "move-packet");
         if (distanceBefore > 16.0d) {
             CruiseDebug.info(ImmersiveAircraftCruise.LOGGER,
                     "[CruiseChunks] corrected server pilot position: player={}, vehicleId={}, distanceBefore={}",

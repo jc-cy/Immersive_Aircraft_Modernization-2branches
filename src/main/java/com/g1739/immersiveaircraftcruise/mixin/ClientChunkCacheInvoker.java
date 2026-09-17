@@ -9,6 +9,4 @@ public interface ClientChunkCacheInvoker {
     @Invoker("updateViewRadius")
     void iacruise$updateViewRadius(int radius);
 
-    @Invoker("updateViewCenter")
-    void iacruise$updateViewCenter(int x, int z);
 }

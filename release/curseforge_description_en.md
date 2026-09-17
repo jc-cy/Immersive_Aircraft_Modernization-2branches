@@ -6,7 +6,7 @@ Immersive_Aircraft_Modernization adds the Overclocked Cruise Guidance Module to 
 
 - Install the module in an Immersive Aircraft upgrade slot, or edit route data while holding it.
 - Create and name multiple routes with default altitude, per-waypoint altitude, and named waypoints.
-- Choose Super Acceleration, Normal, or Eco cruise mode for each route.
+- Choose Super Acceleration, Acceleration, Normal, or Eco cruise mode for each route.
 - Choose a landing strategy for each route: holding pattern, normal landing, or vertical landing where supported.
 
 ## Routes & Preloading
@@ -24,7 +24,7 @@ Immersive_Aircraft_Modernization adds the Overclocked Cruise Guidance Module to 
 
 ## Configuration
 
-- Customize power bonuses and fuel-consumption bonuses for all three cruise modes.
+- Customize power bonuses and fuel-consumption bonuses for all four cruise modes.
 - Configure the horizontal cruise speed limit for airships, airboats, and other hovering vehicles; set it to `0` to disable the limit.
 
 ## Controls & Compatibility

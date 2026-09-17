@@ -8,7 +8,7 @@ Immersive_Aircraft_Modernization adds the Overclocked Cruise Guidance Module to 
 
 - Install the module in an Immersive Aircraft upgrade slot, or edit route data while holding it.
 - Create and name multiple routes with default altitude, per-waypoint altitude, and named waypoints.
-- Choose Super Acceleration, Normal, or Eco cruise mode for each route.
+- Choose Super Acceleration, Acceleration, Normal, or Eco cruise mode for each route.
 - Choose a landing strategy for each route: holding pattern, normal landing, or vertical landing where supported.
 
 ### Routes & Preloading
@@ -26,7 +26,7 @@ Immersive_Aircraft_Modernization adds the Overclocked Cruise Guidance Module to 
 
 ### Configuration
 
-- Customize power bonuses and fuel-consumption bonuses for all three cruise modes.
+- Customize power bonuses and fuel-consumption bonuses for all four cruise modes.
 - Configure the horizontal cruise speed limit for airships, airboats, and other hovering vehicles; set it to `0` to disable the limit.
 
 ### Controls & Compatibility
@@ -47,7 +47,7 @@ License: All Rights Reserved (ARR). See the bundled `LICENSE` and `DISCLAIMER.md
 
 - 模块可安装到沉浸飞机升级槽，也可手持模块编辑航线数据。
 - 支持创建和命名多条航线，设置默认飞行高度、单航点飞行高度和航点名称。
-- 每条航线可独立选择超加速、普通或节能巡航模式。
+- 每条航线可独立选择超加速、加速、普通或节能巡航模式。
 - 每条航线可独立选择盘旋、正常降落；支持的可悬停类载具还可选择垂直降落。
 
 ### 航线与预加载
@@ -65,7 +65,7 @@ License: All Rights Reserved (ARR). See the bundled `LICENSE` and `DISCLAIMER.md
 
 ### 模组配置
 
-- 可自定义超加速、普通、节能三档模式的动力加成和燃料消耗加成。
+- 可自定义超加速、加速、普通、节能四档模式的动力加成和燃料消耗加成。
 - 可配置飞艇、汽艇等可悬停类载具的巡航水平速度上限；设为 `0` 表示不限制。
 
 ### 操作与兼容

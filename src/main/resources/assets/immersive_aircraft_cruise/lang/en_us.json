@@ -20,6 +20,8 @@
   "screen.immersive_aircraft_cruise.cruise_mode.value": "%s",
   "screen.immersive_aircraft_cruise.cruise_mode.super_acceleration": "Super Accel",
   "screen.immersive_aircraft_cruise.cruise_mode.super_acceleration.tooltip": "+100% power, +300% fuel consumption.",
+  "screen.immersive_aircraft_cruise.cruise_mode.acceleration": "Acceleration",
+  "screen.immersive_aircraft_cruise.cruise_mode.acceleration.tooltip": "+60% power, +150% fuel consumption.",
   "screen.immersive_aircraft_cruise.cruise_mode.normal": "Normal",
   "screen.immersive_aircraft_cruise.cruise_mode.normal.tooltip": "+20% power, no extra fuel consumption.",
   "screen.immersive_aircraft_cruise.cruise_mode.eco": "Eco",

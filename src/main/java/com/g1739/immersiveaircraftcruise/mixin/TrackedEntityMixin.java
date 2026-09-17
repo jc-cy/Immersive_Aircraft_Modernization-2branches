@@ -1,8 +1,6 @@
 package com.g1739.immersiveaircraftcruise.mixin;
 
 import com.g1739.immersiveaircraftcruise.cruise.CruiseController;
-import com.g1739.immersiveaircraftcruise.cruise.CruiseVehicleAccess;
-import immersive_aircraft.entity.VehicleEntity;
 import net.minecraft.server.level.ServerEntity;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.server.network.ServerPlayerConnection;
@@ -16,7 +14,7 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
 import java.util.Set;
 
-/** Keeps the piloted cruise vehicle paired with its pilot after vanilla tracking range is exceeded. */
+/** Keeps the cruise vehicle and all onboard players paired beyond normal tracking range. */
 @Mixin(targets = "net.minecraft.server.level.ChunkMap$TrackedEntity")
 public abstract class TrackedEntityMixin {
     @Shadow
@@ -33,8 +31,7 @@ public abstract class TrackedEntityMixin {
 
     @Inject(method = "updatePlayer", at = @At("HEAD"), cancellable = true)
     private void iacruise$keepActiveCruisePilot(ServerPlayer player, CallbackInfo ci) {
-        if (!(entity instanceof VehicleEntity vehicle)
-                || !CruiseController.shouldKeepPilotTracked(vehicle, player)) {
+        if (!CruiseController.shouldKeepCruiseEntityTracked(entity, player)) {
             return;
         }
 

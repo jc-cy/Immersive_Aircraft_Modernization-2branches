@@ -309,6 +309,10 @@ public final class CruiseHud {
         LOCAL_SPEED_SAMPLES.clear();
     }
 
+    public static void invalidateSpeedSample(int entityId) {
+        LOCAL_SPEED_SAMPLES.remove(entityId);
+    }
+
     public static void invalidateFlightTime(int entityId) {
         FLIGHT_INFO.remove(entityId);
     }

@@ -6,7 +6,6 @@ import com.g1739.immersiveaircraftcruise.cruise.CruiseModuleData;
 import com.g1739.immersiveaircraftcruise.cruise.CruiseRoute;
 import com.g1739.immersiveaircraftcruise.ImmersiveAircraftCruise;
 import com.g1739.immersiveaircraftcruise.CruiseDebug;
-import immersive_aircraft.entity.InventoryVehicleEntity;
 import immersive_aircraft.entity.VehicleEntity;
 import net.minecraft.network.FriendlyByteBuf;
 import net.minecraft.network.chat.Component;
@@ -114,8 +113,9 @@ public class ToggleCruiseNavigationPacket {
                 access.iacruise$setRoute(route.copy());
             }
             CruiseController.rememberPilot(vehicle, player);
-            // Send the persisted module first, then the authoritative runtime route directly to the pilot.
-            syncVehicleInventory(player, vehicle);
+            // Refresh upgrade-derived properties for every onboard client before
+            // publishing the authoritative runtime route to the pilot.
+            CruiseController.syncVehicleInventoryToPassengers(vehicle);
             CruiseNetwork.CHANNEL.send(PacketDistributor.PLAYER.with(() -> player),
                     new UpdateCruiseRoutePacket(vehicle.getId(), route.copy()));
             CruiseDebug.info(ImmersiveAircraftCruise.LOGGER,
@@ -128,13 +128,6 @@ public class ToggleCruiseNavigationPacket {
 
     private static CruiseRoute.Waypoint startPoint(VehicleEntity vehicle) {
         return new CruiseRoute.Waypoint((int) Math.floor(vehicle.getX()), (int) Math.floor(vehicle.getZ()), null);
-    }
-
-    private static void syncVehicleInventory(ServerPlayer player, VehicleEntity vehicle) {
-        if (vehicle instanceof InventoryVehicleEntity inventoryVehicle) {
-            CruiseNetwork.CHANNEL.send(PacketDistributor.PLAYER.with(() -> player),
-                    SyncVehicleInventoryPacket.fromVehicle(inventoryVehicle));
-        }
     }
 
     private void mergeClientProgress(VehicleEntity vehicle, CruiseRoute route) {

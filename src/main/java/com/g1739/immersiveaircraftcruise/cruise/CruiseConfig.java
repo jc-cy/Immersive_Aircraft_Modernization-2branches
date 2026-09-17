@@ -6,6 +6,8 @@ import net.minecraftforge.common.ForgeConfigSpec;
 public final class CruiseConfig {
     public static final ForgeConfigSpec.DoubleValue SUPER_ACCELERATION_POWER_BONUS;
     public static final ForgeConfigSpec.DoubleValue SUPER_ACCELERATION_FUEL_BONUS;
+    public static final ForgeConfigSpec.DoubleValue ACCELERATION_POWER_BONUS;
+    public static final ForgeConfigSpec.DoubleValue ACCELERATION_FUEL_BONUS;
     public static final ForgeConfigSpec.DoubleValue NORMAL_POWER_BONUS;
     public static final ForgeConfigSpec.DoubleValue NORMAL_FUEL_BONUS;
     public static final ForgeConfigSpec.DoubleValue ECO_POWER_BONUS;
@@ -22,6 +24,12 @@ public final class CruiseConfig {
         SUPER_ACCELERATION_FUEL_BONUS = builder
                 .comment("Super acceleration mode fuel consumption bonus. 3.0 means +300%, -0.75 means -75%.")
                 .defineInRange("super_acceleration_fuel_bonus", 3.0d, -1.0d, 20.0d);
+        ACCELERATION_POWER_BONUS = builder
+                .comment("Acceleration mode power bonus. 0.6 means +60%.")
+                .defineInRange("acceleration_power_bonus", 0.6d, -1.0d, 10.0d);
+        ACCELERATION_FUEL_BONUS = builder
+                .comment("Acceleration mode fuel consumption bonus. 1.5 means +150%.")
+                .defineInRange("acceleration_fuel_bonus", 1.5d, -1.0d, 20.0d);
         NORMAL_POWER_BONUS = builder
                 .comment("Normal mode power bonus. 0.2 means +20%.")
                 .defineInRange("normal_power_bonus", 0.2d, -1.0d, 10.0d);
@@ -50,6 +58,7 @@ public final class CruiseConfig {
     public static double powerBonus(CruiseRoute.CruiseMode mode, double fallback) {
         return switch (mode) {
             case SUPER_ACCELERATION -> value(SUPER_ACCELERATION_POWER_BONUS, fallback);
+            case ACCELERATION -> value(ACCELERATION_POWER_BONUS, fallback);
             case NORMAL -> value(NORMAL_POWER_BONUS, fallback);
             case ECO -> value(ECO_POWER_BONUS, fallback);
         };
@@ -58,6 +67,7 @@ public final class CruiseConfig {
     public static double fuelBonus(CruiseRoute.CruiseMode mode, double fallback) {
         return switch (mode) {
             case SUPER_ACCELERATION -> value(SUPER_ACCELERATION_FUEL_BONUS, fallback);
+            case ACCELERATION -> value(ACCELERATION_FUEL_BONUS, fallback);
             case NORMAL -> value(NORMAL_FUEL_BONUS, fallback);
             case ECO -> value(ECO_FUEL_BONUS, fallback);
         };

@@ -20,6 +20,8 @@
   "screen.immersive_aircraft_cruise.cruise_mode.value": "%s",
   "screen.immersive_aircraft_cruise.cruise_mode.super_acceleration": "超加速模式",
   "screen.immersive_aircraft_cruise.cruise_mode.super_acceleration.tooltip": "动力 +100%，燃料消耗 +300%。",
+  "screen.immersive_aircraft_cruise.cruise_mode.acceleration": "加速模式",
+  "screen.immersive_aircraft_cruise.cruise_mode.acceleration.tooltip": "动力 +60%，燃料消耗 +150%。",
   "screen.immersive_aircraft_cruise.cruise_mode.normal": "普通模式",
   "screen.immersive_aircraft_cruise.cruise_mode.normal.tooltip": "动力 +20%，燃料消耗不增加。",
   "screen.immersive_aircraft_cruise.cruise_mode.eco": "节能模式",

@@ -58,8 +58,12 @@ public final class CruiseChunkSendScheduler {
     /** Keep the distant corridor ticketed while the separate FULL ticket supplies terrain packets. */
     private static final int ROUTE_PRELOAD_TICKET_LEVEL = 34;
     private static final int ROUTE_FULL_TICKET_LEVEL = 33;
+    /** Keep the aircraft's current physical chunk entity-ticking. */
+    private static final int ROUTE_ENTITY_TICK_TICKET_LEVEL = 31;
     /** The complete route look-ahead must be FULL so the aircraft never outruns the custom stream. */
     private static final int ROUTE_FULL_SLICE_COUNT = ROUTE_LOOKAHEAD_CHUNKS + 1;
+    /** Extra acceleration is available once more than ten route chunks are FULL. */
+    private static final int ROUTE_ACCELERATION_MIN_FULL_CHUNKS = 10;
     /** The client applies at most one full route packet each tick. */
     private static final long ROUTE_PACKET_ACK_TIMEOUT_TICKS = 80L;
     private static final int DIAGNOSTIC_INTERVAL_TICKS = 20;
@@ -67,10 +71,13 @@ public final class CruiseChunkSendScheduler {
             "iacruise_route_preload", Comparator.comparingLong(ChunkPos::toLong));
     private static final TicketType<ChunkPos> ROUTE_FULL_TICKET = TicketType.create(
             "iacruise_route_full", Comparator.comparingLong(ChunkPos::toLong));
+    private static final TicketType<Integer> ROUTE_ENTITY_TICK_TICKET = TicketType.create(
+            "iacruise_route_entity_tick", Comparator.comparingInt(Integer::intValue));
     private static final Map<ServerPlayer, PlayerState> NETWORK_STATES = new IdentityHashMap<>();
     private static final Map<ServerPlayer, String> CONTEXT_STATUSES = new IdentityHashMap<>();
     private static final Map<ServerPlayer, PendingTeleport> PENDING_TELEPORTS = new IdentityHashMap<>();
     private static final Map<ChunkMap, LoadingState> LOADING_STATES = new IdentityHashMap<>();
+    private static final Map<VehicleEntity, EntityTickTicketState> ENTITY_TICK_TICKETS = new IdentityHashMap<>();
     private static final Map<ServerLevel, Set<Long>> CACHE_INVALIDATIONS = new ConcurrentHashMap<>();
 
     private CruiseChunkSendScheduler() {
@@ -158,23 +165,34 @@ public final class CruiseChunkSendScheduler {
             long pendingBefore = state.pendingHashes.getOrDefault(chunkKey, Long.MIN_VALUE);
             boolean currentMatches = currentHash == hash;
             boolean knownSnapshot = acknowledgedBefore == hash || pendingBefore == hash;
+            boolean inCorridor = state.priorityPath.corridorChunks().contains(chunkKey);
             if (chunkState == com.g1739.immersiveaircraftcruise.network.CruiseChunkStatePacket.State.ACTIVE) {
                 if (knownSnapshot && currentMatches) {
                     state.acknowledgedHashes.put(chunkKey, hash);
                     state.pendingHashes.remove(chunkKey, hash);
                     state.pendingSentTicks.remove(chunkKey);
+                    state.unreadyChunks.remove(chunkKey);
                     state.payloadRequestedChunks.remove(chunkKey);
                 } else if (knownSnapshot) {
                     state.clearChunkState(chunkKey);
+                    if (inCorridor) {
+                        state.unreadyChunks.add(chunkKey);
+                    }
                     state.payloadRequestedChunks.add(chunkKey);
                 }
             } else if (chunkState == com.g1739.immersiveaircraftcruise.network.CruiseChunkStatePacket.State.MISSING) {
-                if (knownSnapshot) {
+                if (knownSnapshot || inCorridor) {
                     state.clearChunkState(chunkKey);
+                    if (inCorridor) {
+                        state.unreadyChunks.add(chunkKey);
+                    }
                     state.payloadRequestedChunks.add(chunkKey);
                 }
-            } else if (knownSnapshot) {
+            } else if (knownSnapshot || inCorridor) {
                 state.clearChunkState(chunkKey);
+                if (inCorridor) {
+                    state.unreadyChunks.add(chunkKey);
+                }
             }
             CruiseDebug.debug(ImmersiveAircraftCruise.LOGGER,
                     "[CruiseChunks] client-state player={}, chunk={}/{}, state={}, hash={}, currentHash={}, "
@@ -188,14 +206,171 @@ public final class CruiseChunkSendScheduler {
         }
     }
 
+    /**
+     * Readiness for the extra acceleration granted by a preloaded route. The
+     * vehicle's normal route control never waits on this result; a failed
+     * permit only removes extra power and lets an airplane apply its native
+     * brake input.
+     */
+    public static boolean isAccelerationReady(VehicleEntity vehicle, CruiseRoute route) {
+        NavigationContext navigation = new NavigationContext(vehicle, route,
+                vehicle.getX(), vehicle.getY(), vehicle.getZ());
+        RoutePath path = buildRoutePath(navigation, ROUTE_LOOKAHEAD_CHUNKS);
+        ChunkMap chunkMap = ((ServerLevel) vehicle.level()).getChunkSource().chunkMap;
+        int fullChunks = 0;
+        for (long chunkKey : path.corridorChunks()) {
+            if (findFullChunk(chunkMap, chunkKey) != null) {
+                fullChunks++;
+            }
+        }
+        return fullChunks > ROUTE_ACCELERATION_MIN_FULL_CHUNKS;
+    }
+
+    /** Keeps an active player-controlled cruise aircraft in its current entity-ticking chunk. */
+    static void updateEntityTickingTicket(VehicleEntity vehicle) {
+        EntityTickTicketState previous = ENTITY_TICK_TICKETS.get(vehicle);
+        if (!requiresEntityTicking(vehicle)) {
+            if (previous != null) {
+                releaseEntityTickingTicket(vehicle, previous);
+            }
+            return;
+        }
+
+        ServerLevel level = (ServerLevel) vehicle.level();
+        ServerChunkCache chunkSource = level.getChunkSource();
+        ChunkMap chunkMap = chunkSource.chunkMap;
+        LinkedHashSet<Long> desiredChunks = new LinkedHashSet<>();
+        desiredChunks.add(vehicle.chunkPosition().toLong());
+        if (previous != null
+                && previous.chunkSource() == chunkSource
+                && previous.chunkKeys().equals(desiredChunks)) {
+            return;
+        }
+
+        DistanceManager distanceManager = ((ServerChunkCacheInvoker) chunkSource)
+                .iacruise$getDistanceManager();
+        boolean previousSourceChanged = previous != null && previous.chunkSource() != chunkSource;
+        if (previous != null) {
+            DistanceManager previousDistanceManager = previousSourceChanged
+                    ? ((ServerChunkCacheInvoker) previous.chunkSource()).iacruise$getDistanceManager()
+                    : distanceManager;
+            for (long chunkKey : previous.chunkKeys()) {
+                if (previousSourceChanged || !desiredChunks.contains(chunkKey)) {
+                    removeEntityTickingTicket(previousDistanceManager, new ChunkPos(chunkKey), previous.vehicleId());
+                }
+            }
+        }
+        for (long chunkKey : desiredChunks) {
+            if (previous == null || previousSourceChanged || !previous.chunkKeys().contains(chunkKey)) {
+                ChunkPos chunkPos = new ChunkPos(chunkKey);
+                distanceManager.addTicket(ROUTE_ENTITY_TICK_TICKET, chunkPos,
+                        ROUTE_ENTITY_TICK_TICKET_LEVEL, vehicle.getId());
+            }
+        }
+        ENTITY_TICK_TICKETS.put(vehicle, new EntityTickTicketState(chunkSource, desiredChunks, vehicle.getId()));
+        if (previousSourceChanged) {
+            DistanceManager previousDistanceManager = ((ServerChunkCacheInvoker) previous.chunkSource())
+                    .iacruise$getDistanceManager();
+            previousDistanceManager.runAllUpdates(previous.chunkSource().chunkMap);
+        }
+        distanceManager.runAllUpdates(chunkMap);
+    }
+
     private static void onServerTick(TickEvent.ServerTickEvent event) {
         if (event.phase != TickEvent.Phase.END) {
             return;
         }
         applyPendingTeleports(event.getServer());
         processCacheInvalidations();
-        updateLoadingPriorities(event.getServer());
-        updateNetworkQueues(event.getServer());
+        Map<ServerPlayer, NavigationContext> activeByPlayer = activeNavigationContexts(event.getServer());
+        updateEntityTickingTickets(activeByPlayer);
+        updateAccelerationPermits(activeByPlayer);
+        updateLoadingPriorities(activeByPlayer);
+        updateNetworkQueues(event.getServer(), activeByPlayer);
+    }
+
+    private static void updateAccelerationPermits(Map<ServerPlayer, NavigationContext> activeByPlayer) {
+        Set<NavigationContext> activeFlights = java.util.Collections.newSetFromMap(new IdentityHashMap<>());
+        activeFlights.addAll(activeByPlayer.values());
+        for (NavigationContext navigation : activeFlights) {
+            CruiseController.updatePreloadAccelerationPermit(navigation.vehicle());
+        }
+    }
+
+    private static void updateEntityTickingTickets(Map<ServerPlayer, NavigationContext> activeByPlayer) {
+        Set<VehicleEntity> activeVehicles = java.util.Collections.newSetFromMap(new IdentityHashMap<>());
+        for (NavigationContext navigation : activeByPlayer.values()) {
+            activeVehicles.add(navigation.vehicle());
+        }
+        for (VehicleEntity vehicle : activeVehicles) {
+            updateEntityTickingTicket(vehicle);
+        }
+
+        Iterator<Map.Entry<VehicleEntity, EntityTickTicketState>> iterator = ENTITY_TICK_TICKETS.entrySet().iterator();
+        while (iterator.hasNext()) {
+            Map.Entry<VehicleEntity, EntityTickTicketState> entry = iterator.next();
+            if (activeVehicles.contains(entry.getKey())) {
+                continue;
+            }
+            EntityTickTicketState state = entry.getValue();
+            DistanceManager distanceManager = ((ServerChunkCacheInvoker) state.chunkSource())
+                    .iacruise$getDistanceManager();
+            removeEntityTickingTicket(distanceManager, state);
+            distanceManager.runAllUpdates(state.chunkSource().chunkMap);
+            iterator.remove();
+        }
+    }
+
+    private static boolean requiresEntityTicking(VehicleEntity vehicle) {
+        if (vehicle.level().isClientSide()
+                || !CruiseController.hasCruiseModule(vehicle)
+                || !(vehicle.getControllingPassenger() instanceof ServerPlayer)) {
+            return false;
+        }
+        CruiseRoute route = CruiseController.currentRoute(vehicle);
+        return route.isEnabled()
+                && !route.isHoldingPattern()
+                && route.hasTarget()
+                && route.getSelectedEntry().loadingMode() != CruiseRoute.RouteLoadingMode.VANILLA;
+    }
+
+    private static void releaseEntityTickingTicket(VehicleEntity vehicle, EntityTickTicketState state) {
+        DistanceManager distanceManager = ((ServerChunkCacheInvoker) state.chunkSource())
+                .iacruise$getDistanceManager();
+        removeEntityTickingTicket(distanceManager, state);
+        ENTITY_TICK_TICKETS.remove(vehicle);
+        distanceManager.runAllUpdates(state.chunkSource().chunkMap);
+    }
+
+    private static void removeEntityTickingTicket(DistanceManager distanceManager, EntityTickTicketState state) {
+        for (long chunkKey : state.chunkKeys()) {
+            removeEntityTickingTicket(distanceManager, new ChunkPos(chunkKey), state.vehicleId());
+        }
+    }
+
+    private static void removeEntityTickingTicket(DistanceManager distanceManager, ChunkPos chunkPos, int vehicleId) {
+        distanceManager.removeTicket(ROUTE_ENTITY_TICK_TICKET, chunkPos,
+                ROUTE_ENTITY_TICK_TICKET_LEVEL, vehicleId);
+    }
+
+    /**
+     * Builds one route context per active aircraft and maps every onboard
+     * viewer to that context. Route geometry and server tickets are aircraft
+     * state; acknowledgement and packet delivery remain viewer state.
+     */
+    private static Map<ServerPlayer, NavigationContext> activeNavigationContexts(MinecraftServer server) {
+        IdentityHashMap<VehicleEntity, NavigationContext> byVehicle = new IdentityHashMap<>();
+        IdentityHashMap<ServerPlayer, NavigationContext> byPlayer = new IdentityHashMap<>();
+        for (ServerPlayer player : server.getPlayerList().getPlayers()) {
+            NavigationContext navigation = navigationContext(player);
+            logNavigationContext(player, navigation);
+            if (navigation == null) {
+                continue;
+            }
+            NavigationContext canonical = byVehicle.computeIfAbsent(navigation.vehicle(), ignored -> navigation);
+            byPlayer.put(player, canonical);
+        }
+        return byPlayer;
     }
 
     private static void processCacheInvalidations() {
@@ -216,16 +391,12 @@ public final class CruiseChunkSendScheduler {
         }
     }
 
-    private static void updateLoadingPriorities(MinecraftServer server) {
+    private static void updateLoadingPriorities(Map<ServerPlayer, NavigationContext> activeByPlayer) {
         Map<ChunkMap, DesiredLoading> desiredByMap = new IdentityHashMap<>();
-        for (ServerPlayer player : server.getPlayerList().getPlayers()) {
-            NavigationContext navigation = navigationContext(player);
-            logNavigationContext(player, navigation);
-            if (navigation == null) {
-                continue;
-            }
-
-            ServerChunkCache chunkSource = player.serverLevel().getChunkSource();
+        Set<NavigationContext> activeFlights = java.util.Collections.newSetFromMap(new IdentityHashMap<>());
+        activeFlights.addAll(activeByPlayer.values());
+        for (NavigationContext navigation : activeFlights) {
+            ServerChunkCache chunkSource = ((ServerLevel) navigation.vehicle().level()).getChunkSource();
             ChunkMap chunkMap = chunkSource.chunkMap;
             DesiredLoading desired = desiredByMap.computeIfAbsent(chunkMap,
                     ignored -> new DesiredLoading(chunkSource));
@@ -257,10 +428,11 @@ public final class CruiseChunkSendScheduler {
         }
     }
 
-    private static void updateNetworkQueues(MinecraftServer server) {
+    private static void updateNetworkQueues(MinecraftServer server,
+                                             Map<ServerPlayer, NavigationContext> activeByPlayer) {
         Set<ServerPlayer> activePlayers = java.util.Collections.newSetFromMap(new IdentityHashMap<>());
         for (ServerPlayer player : server.getPlayerList().getPlayers()) {
-            NavigationContext navigation = navigationContext(player);
+            NavigationContext navigation = activeByPlayer.get(player);
             if (navigation == null) {
                 continue;
             }
@@ -467,12 +639,17 @@ public final class CruiseChunkSendScheduler {
     private static void sendAuthoritativeRoute(ServerPlayer player, VehicleEntity vehicle) {
         CruiseNetwork.CHANNEL.send(PacketDistributor.PLAYER.with(() -> player),
                 new UpdateCruiseRoutePacket(vehicle.getId(), CruiseController.currentRoute(vehicle).copy()));
+        CruiseController.syncVehicleInventoryToPlayer(vehicle, player);
+        if (CruiseController.isPilot(vehicle, player)) {
+            CruiseController.synchronizePreloadAccelerationPermit(vehicle, player);
+        }
     }
 
     private static void onServerStopped(ServerStoppedEvent event) {
         NETWORK_STATES.clear();
         PENDING_TELEPORTS.clear();
         CONTEXT_STATUSES.clear();
+        ENTITY_TICK_TICKETS.clear();
         CACHE_INVALIDATIONS.clear();
         for (LoadingState state : LOADING_STATES.values()) {
             state.clear();
@@ -552,13 +729,16 @@ public final class CruiseChunkSendScheduler {
     private static RoutePath buildRoutePath(NavigationContext navigation, int lookaheadChunks) {
         int maxCenterChunks = lookaheadChunks + 1;
         LinkedHashMap<Long, SideOffset> centerChunks = new LinkedHashMap<>();
-        VehicleEntity vehicle = navigation.vehicle();
         CruiseRoute route = navigation.route();
         double startX = navigation.anchorX();
         double startZ = navigation.anchorZ();
 
         List<CruiseRoute.Waypoint> waypoints = route.getSelectedEntry().waypoints();
-        if (route.shouldUseLShaped(startX, startZ)) {
+        boolean useLShaped = route.shouldUseLShaped(startX, startZ);
+        boolean useLongAxisCenterline = route.isLongLRouteCandidate() && !useLShaped;
+        if (useLShaped) {
+            addLShapedSegments(centerChunks, route, startX, startZ, maxCenterChunks);
+        } else if (useLongAxisCenterline) {
             CruiseRoute.Waypoint target = route.getNavigationTarget(startX, startZ);
             if (target != null) {
                 double targetX = target.x() + 0.5d;
@@ -567,21 +747,21 @@ public final class CruiseChunkSendScheduler {
                         maxCenterChunks, SideOffset.ZERO);
             }
         } else {
-        int firstWaypoint = firstForwardWaypoint(route, waypoints, startX, startZ);
-        for (int index = firstWaypoint; index < waypoints.size()
-                && centerChunks.size() < maxCenterChunks; index++) {
-            CruiseRoute.Waypoint waypoint = waypoints.get(index);
-            double targetX = waypoint.x() + 0.5d;
-            double targetZ = waypoint.z() + 0.5d;
-            double deltaX = targetX - startX;
-            double deltaZ = targetZ - startZ;
-            if (deltaX != 0.0d || deltaZ != 0.0d) {
-                addSegmentCenters(centerChunks, startX, startZ, targetX, targetZ,
-                        maxCenterChunks, SideOffset.forSegment(deltaX, deltaZ));
+            int firstWaypoint = firstForwardWaypoint(route, waypoints, startX, startZ);
+            for (int index = firstWaypoint; index < waypoints.size()
+                    && centerChunks.size() < maxCenterChunks; index++) {
+                CruiseRoute.Waypoint waypoint = waypoints.get(index);
+                double targetX = waypoint.x() + 0.5d;
+                double targetZ = waypoint.z() + 0.5d;
+                double deltaX = targetX - startX;
+                double deltaZ = targetZ - startZ;
+                if (deltaX != 0.0d || deltaZ != 0.0d) {
+                    addSegmentCenters(centerChunks, startX, startZ, targetX, targetZ,
+                            maxCenterChunks, SideOffset.forSegment(deltaX, deltaZ));
+                }
+                startX = targetX;
+                startZ = targetZ;
             }
-            startX = targetX;
-            startZ = targetZ;
-        }
         }
 
         LinkedHashSet<Long> corridorChunks = new LinkedHashSet<>();
@@ -601,6 +781,52 @@ public final class CruiseChunkSendScheduler {
             }
         }
         return new RoutePath(corridorChunks, List.copyOf(slices));
+    }
+
+    /**
+     * Builds the remaining geometric L corridor from the server vehicle
+     * position. The controller's L stage is client-authoritative, so progress
+     * is inferred from the vehicle's position relative to the two route legs.
+     */
+    private static void addLShapedSegments(Map<Long, SideOffset> centerChunks,
+                                           CruiseRoute route,
+                                           double startX, double startZ,
+                                           int maxCenterChunks) {
+        CruiseRoute.Waypoint corner = route.getLCornerTarget();
+        CruiseRoute.Waypoint finalLine = route.getLFinalLineTarget();
+        if (corner == null || finalLine == null) {
+            return;
+        }
+
+        double cornerX = corner.x() + 0.5d;
+        double cornerZ = corner.z() + 0.5d;
+        double finalX = finalLine.x() + 0.5d;
+        double finalZ = finalLine.z() + 0.5d;
+        boolean firstAxisX = route.isLFirstAxisX();
+        double finalAxisProgress = (firstAxisX ? startZ - cornerZ : startX - cornerX)
+                * route.lSecondAxisSign();
+        double distanceFromFirstLeg = Math.abs(firstAxisX ? startZ - cornerZ : startX - cornerX);
+        double distanceFromFinalLeg = Math.abs(firstAxisX ? startX - cornerX : startZ - cornerZ);
+
+        if (finalAxisProgress <= 0.0d || distanceFromFinalLeg > distanceFromFirstLeg) {
+            double firstAxisPointX = firstAxisX ? cornerX : startX;
+            double firstAxisPointZ = firstAxisX ? startZ : cornerZ;
+            addSegmentCenters(centerChunks, startX, startZ,
+                    firstAxisPointX, firstAxisPointZ, maxCenterChunks, SideOffset.ZERO);
+            if (centerChunks.size() >= maxCenterChunks) {
+                return;
+            }
+            addSegmentCenters(centerChunks, firstAxisPointX, firstAxisPointZ,
+                    cornerX, cornerZ, maxCenterChunks, SideOffset.ZERO);
+            if (centerChunks.size() >= maxCenterChunks) {
+                return;
+            }
+            startX = cornerX;
+            startZ = cornerZ;
+        }
+
+        addSegmentCenters(centerChunks, startX, startZ, finalX, finalZ,
+                maxCenterChunks, SideOffset.ZERO);
     }
 
     private static int firstForwardWaypoint(CruiseRoute route, List<CruiseRoute.Waypoint> waypoints,
@@ -744,6 +970,9 @@ public final class CruiseChunkSendScheduler {
 
     private record NavigationContext(VehicleEntity vehicle, CruiseRoute route,
                                      double anchorX, double anchorY, double anchorZ) {
+    }
+
+    private record EntityTickTicketState(ServerChunkCache chunkSource, LinkedHashSet<Long> chunkKeys, int vehicleId) {
     }
 
     private record PendingTeleport(VehicleEntity vehicle, double targetX, double targetY, double targetZ,
@@ -1040,11 +1269,13 @@ public final class CruiseChunkSendScheduler {
         private final Map<Long, Long> acknowledgedHashes = new HashMap<>();
         private final Map<Long, Long> pendingHashes = new HashMap<>();
         private final Map<Long, Long> pendingSentTicks = new HashMap<>();
+        /** Chunks reported missing/evicted by the client while they remain in the active corridor. */
+        private final Set<Long> unreadyChunks = new HashSet<>();
         private final Set<Long> payloadRequestedChunks = new HashSet<>();
         private String cacheNamespace = "";
         private boolean routeCacheEnabled;
-        private int cacheCenterX = Integer.MIN_VALUE;
-        private int cacheCenterZ = Integer.MIN_VALUE;
+        private int routeAnchorChunkX = Integer.MIN_VALUE;
+        private int routeAnchorChunkZ = Integer.MIN_VALUE;
         private long routePacketsSent;
         private long routeUnloadsSuppressed;
         private long duplicatePacketsSuppressed;
@@ -1070,6 +1301,7 @@ public final class CruiseChunkSendScheduler {
             acknowledgedHashes.keySet().retainAll(corridor);
             pendingHashes.keySet().retainAll(corridor);
             pendingSentTicks.keySet().retainAll(corridor);
+            unreadyChunks.retainAll(corridor);
             payloadRequestedChunks.retainAll(corridor);
         }
 
@@ -1077,6 +1309,7 @@ public final class CruiseChunkSendScheduler {
             clearChunkState(chunkKey);
             sentChunks.remove(chunkKey);
             if (priorityPath.corridorChunks().contains(chunkKey)) {
+                unreadyChunks.add(chunkKey);
                 payloadRequestedChunks.add(chunkKey);
             }
         }
@@ -1094,9 +1327,9 @@ public final class CruiseChunkSendScheduler {
 
             ChunkPos center = new ChunkPos(
                     net.minecraft.core.BlockPos.containing(navigation.anchorX(), navigation.anchorY(), navigation.anchorZ()));
-            if (cacheCenterX != center.x || cacheCenterZ != center.z) {
-                cacheCenterX = center.x;
-                cacheCenterZ = center.z;
+            if (routeAnchorChunkX != center.x || routeAnchorChunkZ != center.z) {
+                routeAnchorChunkX = center.x;
+                routeAnchorChunkZ = center.z;
                 CruiseDebug.debug(ImmersiveAircraftCruise.LOGGER,
                         "[CruiseChunks] player {} route preload anchor set to {} / {} "
                                 + "(client cache center is maintained locally, serverPlayer={})",
@@ -1114,11 +1347,12 @@ public final class CruiseChunkSendScheduler {
             acknowledgedHashes.clear();
             pendingHashes.clear();
             pendingSentTicks.clear();
+            unreadyChunks.clear();
             payloadRequestedChunks.clear();
             cacheNamespace = "";
             routeCacheEnabled = false;
-            cacheCenterX = Integer.MIN_VALUE;
-            cacheCenterZ = Integer.MIN_VALUE;
+            routeAnchorChunkX = Integer.MIN_VALUE;
+            routeAnchorChunkZ = Integer.MIN_VALUE;
             routePacketsSent = 0L;
             routeUnloadsSuppressed = 0L;
             duplicatePacketsSuppressed = 0L;
@@ -1243,12 +1477,13 @@ public final class CruiseChunkSendScheduler {
                     + ", loadingMode=" + navigation.route().getSelectedEntry().loadingMode()
                     + ", loadingStage=" + navigation.route().getLoadingStage()
                     + ", holding=" + navigation.route().isHoldingPattern()
-                    + ", routePreloadAnchor=" + cacheCenterX + "/" + cacheCenterZ
+                    + ", routePreloadAnchor=" + routeAnchorChunkX + "/" + routeAnchorChunkZ
                     + ", first=" + (first == null ? "none" : first.center() + "/" + first.left() + "/" + first.right())
                     + ", firstState=" + firstStatus
                     + ", sent=" + sentChunks.size()
                     + ", acknowledged=" + acknowledgedHashes.size()
                     + ", pending=" + pendingHashes.size()
+                    + ", unready=" + unreadyChunks.size()
                     + ", payloadRequests=" + payloadRequestedChunks.size()
                     + ", unloadsSuppressed=" + routeUnloadsSuppressed
                     + ", sentNow=" + sentCount

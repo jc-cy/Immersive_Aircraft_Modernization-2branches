@@ -20,7 +20,7 @@ description = '''
 - 每条航线可独立设置巡航模式、路线预加载模式和降落策略。
 - 路线预加载可以大幅降低高速飞行下的性能消耗。包含三种模式：不加载、直线飞行（三格宽）和 L 形飞行（单格宽）。
 - 降落策略飞机可选正常降落和盘旋，飞艇额外有垂直降落
-- 巡航模式有超加速、普通、节能三档模式。
+- 巡航模式有超加速、加速、普通、节能四档模式。
 
 【HUD 信息】
 - 显示速度、燃料数量、燃料剩余时间和飞行剩余时间。
@@ -29,7 +29,7 @@ description = '''
 - 支持多人驾驶位权限、乘客只读信息界面、撞击保护、精细降落控制和成就进度。
 
 【模组配置】
-- 超加速、普通、节能三档模式的动力加成和燃料消耗可在配置中自定义。
+- 超加速、加速、普通、节能四档模式的动力加成和燃料消耗可在配置中自定义。
 - 飞艇、汽艇等可悬停类的巡航水平速度上限可配置；设为 0 表示不限制。
 
 Core Features
@@ -41,7 +41,7 @@ Core Features
 - Each route can independently configure its cruise mode, route preloading mode, and landing strategy.
 - Route preloading can greatly reduce performance overhead during high-speed flight. It offers three modes: None, Three-wide flight (three chunks wide), and L-shaped flight (one chunk wide).
 - Aircraft can choose normal landing or holding pattern; airships additionally support vertical landing.
-- Cruise modes include Super Acceleration, Normal, and Eco.
+- Cruise modes include Super Acceleration, Acceleration, Normal, and Eco.
 
 【HUD Information】
 - Displays speed, fuel amount, fuel time remaining, and flight time remaining.
@@ -50,7 +50,7 @@ Core Features
 - Includes multiplayer pilot permissions, passenger read-only information, collision protection, precise landing control, and advancements.
 
 【Mod Configuration】
-- Power bonuses and fuel consumption for the Super Acceleration, Normal, and Eco modes can be customized in the configuration.
+- Power bonuses and fuel consumption for the Super Acceleration, Acceleration, Normal, and Eco modes can be customized in the configuration.
 - The cruise horizontal speed limit for airships, airboats, and other hovering vehicles can be configured; 0 disables the limit.
 
 【License】
