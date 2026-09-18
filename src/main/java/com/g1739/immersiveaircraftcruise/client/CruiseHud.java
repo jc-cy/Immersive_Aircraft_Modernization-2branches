@@ -26,6 +26,7 @@ public final class CruiseHud {
     private static final Map<Integer, FuelSnapshot> FUEL_INFO = new HashMap<>();
     /** Flight time is sampled once per second from the client tick, never per render frame. */
     private static final Map<Integer, FlightSnapshot> FLIGHT_INFO = new HashMap<>();
+    /** One local pilot sample per client tick; the HUD and heartbeat read the same value. */
     private static final Map<Integer, PositionSample> LOCAL_SPEED_SAMPLES = new HashMap<>();
 
     private record FuelSnapshot(CruiseFuelInfo info, long clientGameTime) {
@@ -202,31 +203,37 @@ public final class CruiseHud {
             remainingTicks = (int) Math.max(0L, remainingTicks - elapsed);
         }
 
-        // Speed is safe to derive locally and must not stop changing when a
-        // delayed server fuel packet is waiting behind route chunk work.
-        double localSpeed = localSpeed(vehicle, now);
         float speed = info.speed();
-        if (Double.isFinite(localSpeed) && localSpeed > 0.05d) {
-            speed = (float) Math.min(LOCAL_SPEED_MAX, localSpeed);
+        if (minecraft.player != null && vehicle.getControllingPassenger() == minecraft.player) {
+            PositionSample localSample = LOCAL_SPEED_SAMPLES.get(vehicle.getId());
+            if (localSample != null) {
+                speed = localSample.speed();
+            }
         }
         return new CruiseFuelInfo(info.amountText(), remainingTicks, info.icon(), speed, info.boosting());
     }
 
-    private static double localSpeed(VehicleEntity vehicle, long clientGameTime) {
+    public static float sampleLocalSpeed(VehicleEntity vehicle) {
+        Minecraft minecraft = Minecraft.getInstance();
+        long clientGameTime = minecraft.level == null ? -1L : minecraft.level.getGameTime();
         double velocitySpeed = vehicle.getDeltaMovement().length() * 20.0d;
         if (clientGameTime < 0L) {
-            return velocitySpeed;
+            return (float) Math.min(LOCAL_SPEED_MAX, Math.max(0.0d, velocitySpeed));
         }
         PositionSample previous = LOCAL_SPEED_SAMPLES.get(vehicle.getId());
-        PositionSample current = new PositionSample(vehicle.position(), clientGameTime);
-        if (previous == null || previous.clientGameTime() == clientGameTime) {
-            LOCAL_SPEED_SAMPLES.put(vehicle.getId(), current);
-            return velocitySpeed;
+        if (previous != null && previous.clientGameTime() == clientGameTime) {
+            return previous.speed();
         }
-        LOCAL_SPEED_SAMPLES.put(vehicle.getId(), current);
-        long elapsedTicks = Math.max(1L, clientGameTime - previous.clientGameTime());
-        double sampledSpeed = vehicle.position().distanceTo(previous.position()) * 20.0d / elapsedTicks;
-        return Math.max(velocitySpeed, sampledSpeed);
+        Vec3 position = vehicle.position();
+        double sampledSpeed = 0.0d;
+        if (previous != null && clientGameTime > previous.clientGameTime()) {
+            long elapsedTicks = Math.max(1L, clientGameTime - previous.clientGameTime());
+            sampledSpeed = position.distanceTo(previous.position()) * 20.0d / elapsedTicks;
+        }
+        double speed = Math.max(velocitySpeed, sampledSpeed);
+        float clampedSpeed = (float) Math.min(LOCAL_SPEED_MAX, Math.max(0.0d, speed));
+        LOCAL_SPEED_SAMPLES.put(vehicle.getId(), new PositionSample(position, clientGameTime, clampedSpeed));
+        return clampedSpeed;
     }
 
     /**
@@ -239,14 +246,17 @@ public final class CruiseHud {
         if (minecraft.level == null || minecraft.player == null) {
             return;
         }
-        long gameTime = minecraft.level.getGameTime();
-        if (gameTime % 20L != 0L) {
-            return;
-        }
         Entity root = minecraft.player.getRootVehicle();
         if (!(root instanceof VehicleEntity vehicle)
                 || !(root instanceof CruiseVehicleAccess access)
                 || !CruiseModuleData.hasModule(vehicle)) {
+            return;
+        }
+        if (vehicle.getControllingPassenger() == minecraft.player) {
+            sampleLocalSpeed(vehicle);
+        }
+        long gameTime = minecraft.level.getGameTime();
+        if (gameTime % 20L != 0L) {
             return;
         }
         CruiseRoute route = access.iacruise$getRoute();
@@ -317,7 +327,7 @@ public final class CruiseHud {
         FLIGHT_INFO.remove(entityId);
     }
 
-    private record PositionSample(Vec3 position, long clientGameTime) {
+    private record PositionSample(Vec3 position, long clientGameTime, float speed) {
     }
 
 }

@@ -12,6 +12,7 @@
     "LevelChunkMixin",
     "EngineVehicleMixin",
     "EngineVehicleAccessor",
+    "ServerLevelAccessor",
     "VehicleEntityMixin",
     "TrackedEntityMixin",
     "ServerGamePacketListenerImplMixin",

@@ -2,6 +2,7 @@ package com.g1739.immersiveaircraftcruise;
 
 import com.g1739.immersiveaircraftcruise.cruise.CruiseChunkSendScheduler;
 import com.g1739.immersiveaircraftcruise.cruise.CruiseConfig;
+import com.g1739.immersiveaircraftcruise.cruise.CruiseController;
 import com.g1739.immersiveaircraftcruise.network.CruiseNetwork;
 import com.mojang.logging.LogUtils;
 import net.minecraftforge.eventbus.api.IEventBus;
@@ -23,6 +24,7 @@ public class ImmersiveAircraftCruise {
         CruiseItems.register(modBus);
         CruiseTabs.register(modBus);
         CruiseNetwork.register();
+        CruiseController.register();
         CruiseChunkSendScheduler.register();
     }
 }

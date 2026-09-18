@@ -5,6 +5,7 @@ import com.g1739.immersiveaircraftcruise.ImmersiveAircraftCruise;
 import com.g1739.immersiveaircraftcruise.mixin.ChunkHolderAccessor;
 import com.g1739.immersiveaircraftcruise.mixin.ChunkMapInvoker;
 import com.g1739.immersiveaircraftcruise.mixin.ServerChunkCacheInvoker;
+import com.g1739.immersiveaircraftcruise.mixin.ServerLevelAccessor;
 import com.g1739.immersiveaircraftcruise.network.CruiseNetwork;
 import com.g1739.immersiveaircraftcruise.network.UpdateCruiseRoutePacket;
 import immersive_aircraft.entity.VehicleEntity;
@@ -78,6 +79,7 @@ public final class CruiseChunkSendScheduler {
     private static final Map<ServerPlayer, PendingTeleport> PENDING_TELEPORTS = new IdentityHashMap<>();
     private static final Map<ChunkMap, LoadingState> LOADING_STATES = new IdentityHashMap<>();
     private static final Map<VehicleEntity, EntityTickTicketState> ENTITY_TICK_TICKETS = new IdentityHashMap<>();
+    private static final Map<VehicleEntity, EntityTickDiagnostic> ENTITY_TICK_DIAGNOSTICS = new IdentityHashMap<>();
     private static final Map<ServerLevel, Set<Long>> CACHE_INVALIDATIONS = new ConcurrentHashMap<>();
 
     private CruiseChunkSendScheduler() {
@@ -284,6 +286,7 @@ public final class CruiseChunkSendScheduler {
         processCacheInvalidations();
         Map<ServerPlayer, NavigationContext> activeByPlayer = activeNavigationContexts(event.getServer());
         updateEntityTickingTickets(activeByPlayer);
+        logEntityTickDiagnostics(event.getServer(), activeByPlayer);
         updateAccelerationPermits(activeByPlayer);
         updateLoadingPriorities(activeByPlayer);
         updateNetworkQueues(event.getServer(), activeByPlayer);
@@ -318,6 +321,86 @@ public final class CruiseChunkSendScheduler {
             removeEntityTickingTicket(distanceManager, state);
             distanceManager.runAllUpdates(state.chunkSource().chunkMap);
             iterator.remove();
+        }
+        ENTITY_TICK_DIAGNOSTICS.keySet().removeIf(vehicle -> !activeVehicles.contains(vehicle));
+    }
+
+    private static void logEntityTickDiagnostics(MinecraftServer server,
+                                                 Map<ServerPlayer, NavigationContext> activeByPlayer) {
+        if (!CruiseDebug.enabled()) {
+            return;
+        }
+        Set<VehicleEntity> activeVehicles = java.util.Collections.newSetFromMap(new IdentityHashMap<>());
+        for (NavigationContext navigation : activeByPlayer.values()) {
+            activeVehicles.add(navigation.vehicle());
+        }
+        long serverTick = server.getTickCount();
+        for (VehicleEntity vehicle : activeVehicles) {
+            ServerLevel level = (ServerLevel) vehicle.level();
+            ServerChunkCache chunkSource = level.getChunkSource();
+            long chunkKey = vehicle.chunkPosition().toLong();
+            ChunkHolder holder = findLoadingHolder(chunkSource.chunkMap, chunkKey);
+            DistanceManager distanceManager = ((ServerChunkCacheInvoker) chunkSource).iacruise$getDistanceManager();
+            boolean entityListContains = ((ServerLevelAccessor) level).iacruise$getEntityTickList().contains(vehicle);
+            boolean entityTickingRange = distanceManager.inEntityTickingRange(chunkKey);
+            boolean positionTicking = chunkSource.isPositionTicking(chunkKey);
+            boolean entitiesLoaded = level.areEntitiesLoaded(chunkKey);
+            boolean positionEntityTicking = level.isPositionEntityTicking(vehicle.blockPosition());
+            boolean entityFutureReady = false;
+            boolean entityFutureDone = false;
+            if (holder != null) {
+                var future = holder.getEntityTickingChunkFuture();
+                entityFutureDone = future.isDone();
+                if (entityFutureDone && !future.isCompletedExceptionally()) {
+                    var result = future.getNow(null);
+                    entityFutureReady = result != null && result.left().isPresent();
+                }
+            }
+            EntityTickTicketState ticketState = ENTITY_TICK_TICKETS.get(vehicle);
+            boolean ownsEntityTicket = ticketState != null && ticketState.chunkKeys().contains(chunkKey);
+            String holderStatus = holder == null ? "missing" : holder.getFullStatus().toString();
+            String signature = entityListContains + ":" + entityTickingRange + ":" + positionTicking + ":"
+                    + entitiesLoaded + ":" + positionEntityTicking + ":" + entityFutureDone + ":"
+                    + entityFutureReady + ":" + ownsEntityTicket + ":" + holderStatus + ":" + vehicle.isRemoved();
+            EntityTickDiagnostic previous = ENTITY_TICK_DIAGNOSTICS.get(vehicle);
+            boolean progressed = previous == null || previous.vehicleTick() != vehicle.tickCount;
+            int stalledTicks = progressed ? 0 : previous.stalledTicks() + 1;
+            String state = !entityListContains ? "not-in-entity-tick-list"
+                    : (!entityTickingRange ? "not-in-entity-ticking-range"
+                    : (progressed ? "ticking" : "eligible-but-tick-not-observed"));
+            boolean recovered = previous != null && previous.stalledTicks() >= 20 && progressed;
+            boolean changed = previous == null || !signature.equals(previous.signature());
+            boolean periodicWarning = stalledTicks >= 20
+                    && (previous == null || serverTick - previous.lastLoggedServerTick() >= 20);
+            boolean periodicInfo = progressed
+                    && (previous == null || serverTick - previous.lastLoggedServerTick() >= 20);
+            if (changed || recovered || periodicWarning || periodicInfo) {
+                String message = "[CruiseEntityTick] serverTick={}, vehicleId={}, vehicleTick={}, stalledTicks={}, "
+                        + "chunk={}, reason={}, entityTickList={}, entityTickingRange={}, positionTicking={}, "
+                        + "entitiesLoaded={}, positionEntityTicking={}, entityFutureDone={}, entityFutureReady={}, "
+                        + "holderStatus={}, holderTicketLevel={}, entityTicketOwned={}, removed={}, passengers={}, pilot={}";
+                if (stalledTicks >= 20) {
+                    ImmersiveAircraftCruise.LOGGER.warn(message, serverTick, vehicle.getId(), vehicle.tickCount,
+                            stalledTicks, vehicle.chunkPosition(), state, entityListContains, entityTickingRange,
+                            positionTicking, entitiesLoaded, positionEntityTicking, entityFutureDone,
+                            entityFutureReady, holderStatus,
+                            holder == null ? -1 : holder.getTicketLevel(), ownsEntityTicket, vehicle.isRemoved(),
+                            vehicle.getPassengers().size(), vehicle.getControllingPassenger());
+                } else {
+                    CruiseDebug.info(ImmersiveAircraftCruise.LOGGER, message, serverTick, vehicle.getId(),
+                            vehicle.tickCount, stalledTicks, vehicle.chunkPosition(), state, entityListContains,
+                            entityTickingRange, positionTicking, entitiesLoaded, positionEntityTicking,
+                            entityFutureDone, entityFutureReady, holderStatus,
+                            holder == null ? -1 : holder.getTicketLevel(), ownsEntityTicket, vehicle.isRemoved(),
+                            vehicle.getPassengers().size(), vehicle.getControllingPassenger());
+                }
+                ENTITY_TICK_DIAGNOSTICS.put(vehicle,
+                        new EntityTickDiagnostic(vehicle.tickCount, stalledTicks, serverTick, signature));
+            } else {
+                ENTITY_TICK_DIAGNOSTICS.put(vehicle,
+                        new EntityTickDiagnostic(vehicle.tickCount, stalledTicks,
+                                previous.lastLoggedServerTick(), signature));
+            }
         }
     }
 
@@ -650,6 +733,7 @@ public final class CruiseChunkSendScheduler {
         PENDING_TELEPORTS.clear();
         CONTEXT_STATUSES.clear();
         ENTITY_TICK_TICKETS.clear();
+        ENTITY_TICK_DIAGNOSTICS.clear();
         CACHE_INVALIDATIONS.clear();
         for (LoadingState state : LOADING_STATES.values()) {
             state.clear();
@@ -973,6 +1057,10 @@ public final class CruiseChunkSendScheduler {
     }
 
     private record EntityTickTicketState(ServerChunkCache chunkSource, LinkedHashSet<Long> chunkKeys, int vehicleId) {
+    }
+
+    private record EntityTickDiagnostic(int vehicleTick, int stalledTicks,
+                                        long lastLoggedServerTick, String signature) {
     }
 
     private record PendingTeleport(VehicleEntity vehicle, double targetX, double targetY, double targetZ,

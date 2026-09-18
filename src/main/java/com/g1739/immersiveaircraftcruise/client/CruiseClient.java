@@ -3,6 +3,7 @@ package com.g1739.immersiveaircraftcruise.client;
 import com.g1739.immersiveaircraftcruise.ImmersiveAircraftCruise;
 import com.g1739.immersiveaircraftcruise.CruiseDebug;
 import com.g1739.immersiveaircraftcruise.cruise.CruiseController;
+import com.g1739.immersiveaircraftcruise.cruise.CruiseModuleData;
 import com.g1739.immersiveaircraftcruise.cruise.CruiseRoute;
 import com.g1739.immersiveaircraftcruise.cruise.CruiseVehicleAccess;
 import com.g1739.immersiveaircraftcruise.network.CruiseNetwork;
@@ -10,6 +11,7 @@ import com.g1739.immersiveaircraftcruise.network.CruiseChunkStatePacket;
 import com.g1739.immersiveaircraftcruise.network.RequestOpenCruiseScreenPacket;
 import com.g1739.immersiveaircraftcruise.network.StopCruiseNavigationPacket;
 import com.g1739.immersiveaircraftcruise.network.ToggleCruiseNavigationPacket;
+import com.g1739.immersiveaircraftcruise.network.UpdateCruisePilotSpeedPacket;
 import com.mojang.blaze3d.platform.InputConstants;
 import immersive_aircraft.client.KeyBindings;
 import immersive_aircraft.entity.VehicleEntity;
@@ -114,7 +116,25 @@ public final class CruiseClient {
             CruiseHud.clientTick();
             reportMissingAccelerationChunks();
             logClientFlightState();
+            sendPilotSpeedHeartbeat();
             ClientPacketHandlers.processQueuedCruiseChunks();
+        }
+
+        private static void sendPilotSpeedHeartbeat() {
+            Minecraft minecraft = Minecraft.getInstance();
+            if (minecraft.level == null || minecraft.player == null
+                    || minecraft.level.getGameTime() % 5L != 0L) {
+                return;
+            }
+            Entity root = minecraft.player.getRootVehicle();
+            if (!(root instanceof VehicleEntity vehicle)
+                    || !(vehicle instanceof CruiseVehicleAccess)
+                    || vehicle.getControllingPassenger() != minecraft.player
+                    || !CruiseModuleData.hasModule(vehicle)) {
+                return;
+            }
+            CruiseNetwork.CHANNEL.sendToServer(new UpdateCruisePilotSpeedPacket(
+                    vehicle.getId(), CruiseHud.sampleLocalSpeed(vehicle)));
         }
 
         @SubscribeEvent

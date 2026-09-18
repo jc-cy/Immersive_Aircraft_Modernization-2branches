@@ -20,8 +20,10 @@ import immersive_aircraft.entity.inventory.slots.SlotDescription;
 import immersive_aircraft.entity.misc.BoundingBoxDescriptor;
 import immersive_aircraft.item.upgrade.VehicleStat;
 import net.minecraft.advancements.Advancement;
+import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.network.chat.Component;
 import net.minecraft.resources.ResourceLocation;
+import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.util.Mth;
 import net.minecraft.world.entity.Entity;
@@ -30,15 +32,20 @@ import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.phys.Vec3;
 import net.minecraftforge.common.capabilities.ForgeCapabilities;
+import net.minecraftforge.common.MinecraftForge;
+import net.minecraftforge.event.TickEvent;
 import net.minecraftforge.fluids.FluidStack;
 import net.minecraftforge.fluids.capability.IFluidHandlerItem;
 import net.minecraftforge.network.PacketDistributor;
 import org.joml.Matrix3f;
 import org.joml.Vector3f;
 
+import java.util.Collections;
+import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 import java.util.WeakHashMap;
 
 public final class CruiseController {
@@ -154,9 +161,10 @@ public final class CruiseController {
     private static final float BOOST_RISE_PER_TICK = 0.08f;
     private static final float BOOST_FALL_PER_TICK = 0.06f;
     private static final int HUD_SYNC_INTERVAL_TICKS = 5;
+    private static final int PILOT_SPEED_TIMEOUT_TICKS = 20;
     private static final int BOOST_SYNC_INTERVAL_TICKS = 5;
     private static final int BOOST_SYNC_LEVEL_STEPS = 20;
-    private static final double HUD_SPEED_MAX = 512.0d;
+    private static final float PILOT_SPEED_MAX = 512.0f;
     private static final float SPEED_ADVANCEMENT_THRESHOLD = 117.0f;
     private static final ResourceLocation SPEED_ADVANCEMENT_ID = new ResourceLocation(ImmersiveAircraftCruise.MOD_ID, "speed_117");
     private static final Map<VehicleEntity, Float> TURN_MEMORY = new WeakHashMap<>();
@@ -171,7 +179,8 @@ public final class CruiseController {
     private static final Map<VehicleEntity, Boolean> PRELOAD_ACCELERATION_PERMITTED = new WeakHashMap<>();
     private static final Map<VehicleEntity, Boolean> LAST_SENT_ACCELERATION_PERMITTED = new WeakHashMap<>();
     private static final Map<VehicleEntity, Vec3> CONTROLLER_VELOCITY_BEFORE = new WeakHashMap<>();
-    private static final Map<VehicleEntity, SpeedSample> HUD_SPEED_SAMPLES = new WeakHashMap<>();
+    /** Last speed reported by the local pilot; expired values are not used for HUD sync. */
+    private static final Map<VehicleEntity, PilotSpeedSample> PILOT_SPEEDS = new WeakHashMap<>();
     private static final Map<VehicleEntity, ItemStack> ACTIVE_MODULE = new WeakHashMap<>();
     private static final Map<VehicleEntity, String> ACTIVE_MODULE_ID = new WeakHashMap<>();
     private static final Map<VehicleEntity, ServerPlayer> LAST_PILOT = new WeakHashMap<>();
@@ -198,7 +207,35 @@ public final class CruiseController {
     private record LTurnEstimate(double alongDistance, int ticks) {
     }
 
+    private record PilotSpeedSample(float speed, int serverTick) {
+    }
+
     private CruiseController() {
+    }
+
+    public static void register() {
+        MinecraftForge.EVENT_BUS.addListener(CruiseController::onServerTick);
+    }
+
+    private static void onServerTick(TickEvent.ServerTickEvent event) {
+        if (event.phase != TickEvent.Phase.END
+                || event.getServer().getTickCount() % HUD_SYNC_INTERVAL_TICKS != 0) {
+            return;
+        }
+        syncFuelInfo(event.getServer());
+    }
+
+    private static void syncFuelInfo(MinecraftServer server) {
+        Set<EngineVehicle> vehicles = Collections.newSetFromMap(new IdentityHashMap<>());
+        for (ServerPlayer player : server.getPlayerList().getPlayers()) {
+            if (player.getRootVehicle() instanceof EngineVehicle vehicle
+                    && CruiseModuleData.hasModule(vehicle)) {
+                vehicles.add(vehicle);
+            }
+        }
+        for (EngineVehicle vehicle : vehicles) {
+            syncFuelInfo(vehicle);
+        }
     }
 
     public static boolean hasCruiseModule(Entity entity) {
@@ -320,7 +357,6 @@ public final class CruiseController {
                 pauseNavigationForNoFuel(vehicle, access, route, false);
             }
         }
-        syncFuelInfo(vehicle, engineVehicle);
     }
 
     public static void tick(VehicleEntity vehicle, boolean braking) {
@@ -3284,6 +3320,14 @@ public final class CruiseController {
         setBoosting(vehicle, access, active, active ? boostLevel : 0.0f);
     }
 
+    public static void updatePilotSpeed(VehicleEntity vehicle, float speed) {
+        if (vehicle.level().isClientSide()) {
+            return;
+        }
+        PILOT_SPEEDS.put(vehicle, new PilotSpeedSample(Mth.clamp(speed, 0.0f, PILOT_SPEED_MAX),
+                vehicle.level().getServer().getTickCount()));
+    }
+
     private static void stopNavigation(VehicleEntity vehicle, CruiseVehicleAccess access, CruiseRoute route,
                                        ServerPlayer messagePlayer, boolean clientSide) {
         stopNavigation(vehicle, access, route, messagePlayer, clientSide, CruiseNavigationStopReason.NORMAL);
@@ -3590,10 +3634,8 @@ public final class CruiseController {
         syncRouteToPassengers(vehicle, route);
     }
 
-    private static void syncFuelInfo(VehicleEntity vehicle, EngineVehicle engineVehicle) {
-        if (vehicle.tickCount % HUD_SYNC_INTERVAL_TICKS != 0) {
-            return;
-        }
+    private static void syncFuelInfo(EngineVehicle engineVehicle) {
+        VehicleEntity vehicle = engineVehicle;
         List<SlotDescription> slots = engineVehicle.getInventoryDescription().getSlots(VehicleInventoryDescription.BOILER);
         int[] fuel = engineVehicle instanceof EngineVehicleAccessor accessor
                 ? accessor.immersive_aircraft_cruise$getFuel()
@@ -3610,16 +3652,29 @@ public final class CruiseController {
         }
         float consumption = Math.max(0.0f, engineVehicle.getFuelConsumption());
         int remainingTicks = consumption <= 0.0f ? -1 : clampTicks((storedFuel + display.pendingFuel()) / (double) consumption);
-        float speed = hudSpeed(vehicle);
+        float speed = pilotSpeed(vehicle);
         boolean boosting = engineVehicle instanceof CruiseVehicleAccess access && access.iacruise$isBoosting();
         CruiseFuelInfo fuelInfo = new CruiseFuelInfo(display.amountText(), remainingTicks, icon, speed, boosting);
         for (Entity passenger : vehicle.getPassengers()) {
             if (passenger instanceof ServerPlayer player) {
                 awardSpeedAdvancement(player, speed);
+                String recipientRole = vehicle.getControllingPassenger() == player ? "pilot" : "passenger";
+                CruiseDebug.info(ImmersiveAircraftCruise.LOGGER,
+                        "[CruiseFuelSync] send: serverTick={}, vehicleId={}, vehicleTick={}, recipient={}, "
+                                + "role={}, amount={}, remainingTicks={}, speed={}, boosting={}, icon={}",
+                        vehicle.level().getServer().getTickCount(), vehicle.getId(), vehicle.tickCount,
+                        player.getScoreboardName(), recipientRole, fuelInfo.amountText(),
+                        fuelInfo.remainingTicks(), fuelInfo.speed(), fuelInfo.boosting(), describeFuelIcon(icon));
                 CruiseNetwork.CHANNEL.send(PacketDistributor.PLAYER.with(() -> player),
                         new UpdateCruiseFuelPacket(vehicle.getId(), fuelInfo));
             }
         }
+    }
+
+    private static String describeFuelIcon(ItemStack icon) {
+        return icon.isEmpty()
+                ? "empty"
+                : BuiltInRegistries.ITEM.getKey(icon.getItem()) + "x" + icon.getCount();
     }
 
     private static void awardSpeedAdvancement(ServerPlayer player, float speed) {
@@ -3632,18 +3687,13 @@ public final class CruiseController {
         }
     }
 
-    private static float hudSpeed(VehicleEntity vehicle) {
-        Vec3 position = vehicle.position();
-        long gameTime = vehicle.level().getGameTime();
-        SpeedSample previous = HUD_SPEED_SAMPLES.put(vehicle, new SpeedSample(position, gameTime));
-        double sampledSpeed = 0.0d;
-        if (previous != null) {
-            long elapsedTicks = Math.max(1L, gameTime - previous.gameTime());
-            sampledSpeed = position.distanceTo(previous.position()) * 20.0d / elapsedTicks;
+    private static float pilotSpeed(VehicleEntity vehicle) {
+        PilotSpeedSample sample = PILOT_SPEEDS.get(vehicle);
+        if (sample == null
+                || vehicle.level().getServer().getTickCount() - sample.serverTick() >= PILOT_SPEED_TIMEOUT_TICKS) {
+            return 0.0f;
         }
-        double velocitySpeed = vehicle.getDeltaMovement().length() * 20.0d;
-        double speed = sampledSpeed > 0.05d ? sampledSpeed : velocitySpeed;
-        return (float) Mth.clamp(speed, 0.0d, HUD_SPEED_MAX);
+        return sample.speed();
     }
 
     private static int displayedFuelSlot(EngineVehicle engineVehicle, List<SlotDescription> slots, int[] fuel) {
@@ -3743,9 +3793,6 @@ public final class CruiseController {
         private static FuelSlotDisplay empty() {
             return new FuelSlotDisplay("0", 0L, ItemStack.EMPTY);
         }
-    }
-
-    private record SpeedSample(Vec3 position, long gameTime) {
     }
 
     private record BoostSyncState(boolean boosting, int levelStep, int tick) {

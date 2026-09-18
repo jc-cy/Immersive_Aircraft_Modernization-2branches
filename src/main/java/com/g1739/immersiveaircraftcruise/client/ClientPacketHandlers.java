@@ -299,11 +299,16 @@ public final class ClientPacketHandlers {
             }
         }
         CruiseHud.setFuelInfo(entityId, fuelInfo);
-        CruiseDebug.debug(ImmersiveAircraftCruise.LOGGER,
-                "[CruiseHud] fuel sync applied: entityId={}, remainingTicks={}, amount={}, speed={}, "
-                        + "boosting={}, clientGameTime={}, thread={}",
-                entityId, fuelInfo.remainingTicks(), fuelInfo.amountText(), fuelInfo.speed(),
-                fuelInfo.boosting(), minecraft.level == null ? -1L : minecraft.level.getGameTime(),
+        Entity entity = minecraft.level == null ? null : minecraft.level.getEntity(entityId);
+        String recipientRole = entity instanceof VehicleEntity vehicle
+                && minecraft.player != null
+                && vehicle.getControllingPassenger() == minecraft.player
+                ? "pilot" : "passenger";
+        CruiseDebug.info(ImmersiveAircraftCruise.LOGGER,
+                "[CruiseFuelSync] received: clientGameTime={}, entityId={}, role={}, amount={}, "
+                        + "remainingTicks={}, speed={}, boosting={}, thread={}",
+                minecraft.level == null ? -1L : minecraft.level.getGameTime(), entityId, recipientRole,
+                fuelInfo.amountText(), fuelInfo.remainingTicks(), fuelInfo.speed(), fuelInfo.boosting(),
                 Thread.currentThread().getName());
     }
 
