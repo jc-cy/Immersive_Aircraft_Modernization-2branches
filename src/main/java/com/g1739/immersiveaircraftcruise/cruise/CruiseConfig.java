@@ -79,11 +79,9 @@ public final class CruiseConfig {
     }
 
     private static double value(ForgeConfigSpec.DoubleValue value, double fallback) {
-        try {
-            double configured = value.get();
-            return Double.isFinite(configured) ? configured : fallback;
-        } catch (RuntimeException ignored) {
-            return fallback;
-        }
+        // Deliberately not wrapped in a catch: a config that cannot be read is a problem to surface, not
+        // to hide behind the default value.
+        double configured = value.get();
+        return Double.isFinite(configured) ? configured : fallback;
     }
 }

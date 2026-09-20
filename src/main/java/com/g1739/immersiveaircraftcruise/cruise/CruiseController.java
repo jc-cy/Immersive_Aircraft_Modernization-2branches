@@ -82,9 +82,7 @@ public final class CruiseController {
     private static final double LANDING_ALTITUDE_RADIUS = 1.0;
     private static final double FAST_LANDING_PLAN_ALTITUDE_RADIUS = 1.0;
     private static final double FAST_LANDING_COMPLETION_ALTITUDE_RADIUS = 1.0;
-    private static final double FAST_LANDING_POST_BRAKE_ALTITUDE_RADIUS = 1.0;
     private static final double FAST_LANDING_POST_BRAKE_STOP_SPEED = 0.06;
-    private static final double LANDING_STOP_SPEED = 0.06;
     private static final double LANDING_VERTICAL_STOP_SPEED = 0.08;
     private static final int POST_LANDING_BRAKE_TICKS = 100;
     private static final double FAST_LANDING_DESCENT_BUFFER = 8.0;
@@ -118,7 +116,6 @@ public final class CruiseController {
     private static final float ROTORCRAFT_TOUCHDOWN_BRAKE_INPUT = 0.18f;
     private static final int ROTORCRAFT_FAST_LANDING_VERTICAL_SIMULATION_TICKS = 1200;
     private static final int ROTORCRAFT_FAST_LANDING_VERTICAL_COAST_TICKS = 100;
-    private static final double ROTORCRAFT_FAST_LANDING_COMPLETION_ALTITUDE_RADIUS = 1.0;
     private static final double FAST_LANDING_LATERAL_DEAD_ZONE = 0.5;
     private static final float AIRPLANE_LANDING_PITCH_LIMIT = 85.0f;
     private static final double AIRPLANE_GROUND_APPROACH_DEAD_ZONE = 0.25;
@@ -259,10 +256,6 @@ public final class CruiseController {
 
     public static void setPreloadAutoDeceleration(boolean enabled) {
         preloadAutoDeceleration = enabled;
-    }
-
-    public static boolean shouldKeepPilotTracked(VehicleEntity vehicle, ServerPlayer player) {
-        return isPilot(vehicle, player) && hasCruiseModule(vehicle);
     }
 
     /** Returns whether a player is still seated on the aircraft's root vehicle. */
@@ -1821,20 +1814,6 @@ public final class CruiseController {
             return FAST_LANDING_GROUND_TAXI_THROTTLE_INPUT;
         }
         return 0.0f;
-    }
-
-    private static void tickCirclingDescent(VehicleEntity vehicle, CruiseRoute route, double altitudeError) {
-        float climbInput = altitudeInput(vehicle, altitudeError);
-        float turn = -1.0f;
-        if (vehicle instanceof AirplaneEntity) {
-            setCruiseInputs(vehicle, turn, -1.0f, Math.max(0.25f, -climbInput));
-        } else {
-            setCruiseInputs(vehicle, turn, climbInput, 1.0f);
-            vehicle.setYRot(vehicle.getYRot() - turn * 1.5f);
-        }
-        if (vehicle instanceof EngineVehicle engineVehicle) {
-            engineVehicle.setEngineTarget(Math.max(0.35f, engineVehicle.getEngineTarget() - 0.04f));
-        }
     }
 
     private static void brakeForLanding(VehicleEntity vehicle, double horizontalDistance) {
@@ -3815,22 +3794,4 @@ public final class CruiseController {
     private record BoostSyncState(boolean boosting, int levelStep, int tick) {
     }
 
-    public static Vec3 targetPosition(VehicleEntity vehicle) {
-        if (!(vehicle instanceof CruiseVehicleAccess access)) {
-            return null;
-        }
-        CruiseRoute route = access.iacruise$getRoute();
-        CruiseRoute.Waypoint waypoint = route.getTarget();
-        if (waypoint == null) {
-            waypoint = route.getCurrentWaypoint();
-        }
-        if (waypoint == null) {
-            waypoint = route.getFinalTarget();
-        }
-        double altitude = route.isHoldingPattern()
-                || LANDING_ACTIVE.containsKey(vehicle)
-                ? route.getFinalAltitude()
-                : route.getTargetAltitude();
-        return waypoint == null ? null : new Vec3(waypoint.x() + 0.5, altitude, waypoint.z() + 0.5);
-    }
 }

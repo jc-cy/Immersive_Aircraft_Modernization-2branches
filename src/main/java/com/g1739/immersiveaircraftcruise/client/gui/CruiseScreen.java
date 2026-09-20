@@ -728,11 +728,6 @@ public class CruiseScreen extends Screen {
         return landingMode;
     }
 
-    private boolean draftHasLandingAltitude() {
-        updateLandingAltitude();
-        return landingAltitude != null;
-    }
-
     private void markDirty() {
         if (readOnly) {
             return;
