@@ -19,8 +19,10 @@ description = '''
 - 支持多航线编辑命名、飞行高度、多节点等，建议游戏内查看。
 - 每条航线可独立设置巡航模式、路线预加载模式和降落策略。
 - 路线预加载可以大幅降低高速飞行下的性能消耗。包含三种模式：不加载、直线飞行（三格宽）和 L 形飞行（单格宽）。
-- 降落策略飞机可选正常降落和盘旋，飞艇额外有垂直降落
+- 预加载模式下均有加载保护，前方必要区块未加载时自动降低速度；性能不足或高速飞行建议开启 L 形飞行预加载。
+- 降落策略飞机可选正常降落和盘旋，飞艇额外有垂直降落。
 - 巡航模式有超加速、加速、普通、节能四档模式。
+- 各种功能已适配多人乘坐飞机。
 
 【HUD 信息】
 - 显示速度、燃料数量、燃料剩余时间和飞行剩余时间。
@@ -40,8 +42,10 @@ Core Features
 - Supports editing and naming multiple routes, setting flight altitude, and configuring multiple waypoints; see the in-game interface for details.
 - Each route can independently configure its cruise mode, route preloading mode, and landing strategy.
 - Route preloading can greatly reduce performance overhead during high-speed flight. It offers three modes: None, Three-wide flight (three chunks wide), and L-shaped flight (one chunk wide).
+- All preloading modes include load protection: when the required chunks ahead are not loaded, the aircraft automatically reduces speed. L-shaped preloading is recommended when performance is limited or when flying at high speed.
 - Aircraft can choose normal landing or holding pattern; airships additionally support vertical landing.
 - Cruise modes include Super Acceleration, Acceleration, Normal, and Eco.
+- All features have been adapted for multiplayer aircraft with multiple passengers.
 
 【HUD Information】
 - Displays speed, fuel amount, fuel time remaining, and flight time remaining.
