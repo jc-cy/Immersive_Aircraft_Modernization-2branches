@@ -37,6 +37,17 @@ public final class CruiseModuleData {
         return findModule(vehicle).isPresent();
     }
 
+    /**
+     * Preload loading modes stream the route from the server, so their aircraft has to keep ticking
+     * across chunk borders the way a player does. Vanilla mode never needs that guarantee.
+     */
+    public static boolean usesPreloadRoute(VehicleEntity vehicle) {
+        return findModule(vehicle)
+                .map(CruiseModuleData::read)
+                .map(route -> route.getSelectedEntry().loadingMode() != CruiseRoute.RouteLoadingMode.VANILLA)
+                .orElse(false);
+    }
+
     public static CruiseRoute read(ItemStack stack) {
         CompoundTag tag = stack.getTag();
         if (tag == null || !tag.contains(ROUTE_TAG, Tag.TAG_COMPOUND)) {

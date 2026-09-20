@@ -59,8 +59,8 @@ public final class CruiseChunkSendScheduler {
     /** Keep the distant corridor ticketed while the separate FULL ticket supplies terrain packets. */
     private static final int ROUTE_PRELOAD_TICKET_LEVEL = 34;
     private static final int ROUTE_FULL_TICKET_LEVEL = 33;
-    /** Keep the aircraft's current physical chunk entity-ticking. */
-    private static final int ROUTE_ENTITY_TICK_TICKET_LEVEL = 31;
+    /** Keep the aircraft's current physical chunk loaded; its ticking comes from Entity#isAlwaysTicking. */
+    private static final int ROUTE_ENTITY_CHUNK_TICKET_LEVEL = 33;
     /** The complete route look-ahead must be FULL so the aircraft never outruns the custom stream. */
     private static final int ROUTE_FULL_SLICE_COUNT = ROUTE_LOOKAHEAD_CHUNKS + 1;
     /** Extra acceleration is available once more than ten route chunks are FULL. */
@@ -68,17 +68,21 @@ public final class CruiseChunkSendScheduler {
     /** The client applies at most one full route packet each tick. */
     private static final long ROUTE_PACKET_ACK_TIMEOUT_TICKS = 80L;
     private static final int DIAGNOSTIC_INTERVAL_TICKS = 20;
+    private static final String ENTITY_TICK_MESSAGE =
+            "[CruiseEntityTick] serverTick={}, vehicleId={}, vehicleTick={}, stalledTicks={}, chunk={}, reason={}, "
+                    + "alwaysTicking={}, entityTickList={}, entityTickingRange={}, holderStatus={}, "
+                    + "holderTicketLevel={}, entityTicketOwned={}, removed={}, passengers={}, pilot={}";
     private static final TicketType<ChunkPos> ROUTE_PRELOAD_TICKET = TicketType.create(
             "iacruise_route_preload", Comparator.comparingLong(ChunkPos::toLong));
     private static final TicketType<ChunkPos> ROUTE_FULL_TICKET = TicketType.create(
             "iacruise_route_full", Comparator.comparingLong(ChunkPos::toLong));
-    private static final TicketType<Integer> ROUTE_ENTITY_TICK_TICKET = TicketType.create(
-            "iacruise_route_entity_tick", Comparator.comparingInt(Integer::intValue));
+    private static final TicketType<Integer> ROUTE_ENTITY_CHUNK_TICKET = TicketType.create(
+            "iacruise_route_entity_chunk", Comparator.comparingInt(Integer::intValue));
     private static final Map<ServerPlayer, PlayerState> NETWORK_STATES = new IdentityHashMap<>();
     private static final Map<ServerPlayer, String> CONTEXT_STATUSES = new IdentityHashMap<>();
     private static final Map<ServerPlayer, PendingTeleport> PENDING_TELEPORTS = new IdentityHashMap<>();
     private static final Map<ChunkMap, LoadingState> LOADING_STATES = new IdentityHashMap<>();
-    private static final Map<VehicleEntity, EntityTickTicketState> ENTITY_TICK_TICKETS = new IdentityHashMap<>();
+    private static final Map<VehicleEntity, EntityChunkTicketState> ENTITY_CHUNK_TICKETS = new IdentityHashMap<>();
     private static final Map<VehicleEntity, EntityTickDiagnostic> ENTITY_TICK_DIAGNOSTICS = new IdentityHashMap<>();
     private static final Map<ServerLevel, Set<Long>> CACHE_INVALIDATIONS = new ConcurrentHashMap<>();
 
@@ -228,12 +232,12 @@ public final class CruiseChunkSendScheduler {
         return fullChunks > ROUTE_ACCELERATION_MIN_FULL_CHUNKS;
     }
 
-    /** Keeps an active player-controlled cruise aircraft in its current entity-ticking chunk. */
-    static void updateEntityTickingTicket(VehicleEntity vehicle) {
-        EntityTickTicketState previous = ENTITY_TICK_TICKETS.get(vehicle);
-        if (!requiresEntityTicking(vehicle)) {
+    /** Keeps the current chunk of an actively preloading aircraft loaded while it flies. */
+    static void updateEntityChunkTicket(VehicleEntity vehicle) {
+        EntityChunkTicketState previous = ENTITY_CHUNK_TICKETS.get(vehicle);
+        if (!requiresEntityChunkTicket(vehicle)) {
             if (previous != null) {
-                releaseEntityTickingTicket(vehicle, previous);
+                releaseEntityChunkTicket(vehicle, previous);
             }
             return;
         }
@@ -258,18 +262,18 @@ public final class CruiseChunkSendScheduler {
                     : distanceManager;
             for (long chunkKey : previous.chunkKeys()) {
                 if (previousSourceChanged || !desiredChunks.contains(chunkKey)) {
-                    removeEntityTickingTicket(previousDistanceManager, new ChunkPos(chunkKey), previous.vehicleId());
+                    removeEntityChunkTicket(previousDistanceManager, new ChunkPos(chunkKey), previous.vehicleId());
                 }
             }
         }
         for (long chunkKey : desiredChunks) {
             if (previous == null || previousSourceChanged || !previous.chunkKeys().contains(chunkKey)) {
                 ChunkPos chunkPos = new ChunkPos(chunkKey);
-                distanceManager.addTicket(ROUTE_ENTITY_TICK_TICKET, chunkPos,
-                        ROUTE_ENTITY_TICK_TICKET_LEVEL, vehicle.getId());
+                distanceManager.addTicket(ROUTE_ENTITY_CHUNK_TICKET, chunkPos,
+                        ROUTE_ENTITY_CHUNK_TICKET_LEVEL, vehicle.getId());
             }
         }
-        ENTITY_TICK_TICKETS.put(vehicle, new EntityTickTicketState(chunkSource, desiredChunks, vehicle.getId()));
+        ENTITY_CHUNK_TICKETS.put(vehicle, new EntityChunkTicketState(chunkSource, desiredChunks, vehicle.getId()));
         if (previousSourceChanged) {
             DistanceManager previousDistanceManager = ((ServerChunkCacheInvoker) previous.chunkSource())
                     .iacruise$getDistanceManager();
@@ -285,7 +289,7 @@ public final class CruiseChunkSendScheduler {
         applyPendingTeleports(event.getServer());
         processCacheInvalidations();
         Map<ServerPlayer, NavigationContext> activeByPlayer = activeNavigationContexts(event.getServer());
-        updateEntityTickingTickets(activeByPlayer);
+        updateEntityChunkTickets(activeByPlayer);
         logEntityTickDiagnostics(event.getServer(), activeByPlayer);
         updateAccelerationPermits(activeByPlayer);
         updateLoadingPriorities(activeByPlayer);
@@ -300,25 +304,25 @@ public final class CruiseChunkSendScheduler {
         }
     }
 
-    private static void updateEntityTickingTickets(Map<ServerPlayer, NavigationContext> activeByPlayer) {
+    private static void updateEntityChunkTickets(Map<ServerPlayer, NavigationContext> activeByPlayer) {
         Set<VehicleEntity> activeVehicles = java.util.Collections.newSetFromMap(new IdentityHashMap<>());
         for (NavigationContext navigation : activeByPlayer.values()) {
             activeVehicles.add(navigation.vehicle());
         }
         for (VehicleEntity vehicle : activeVehicles) {
-            updateEntityTickingTicket(vehicle);
+            updateEntityChunkTicket(vehicle);
         }
 
-        Iterator<Map.Entry<VehicleEntity, EntityTickTicketState>> iterator = ENTITY_TICK_TICKETS.entrySet().iterator();
+        Iterator<Map.Entry<VehicleEntity, EntityChunkTicketState>> iterator = ENTITY_CHUNK_TICKETS.entrySet().iterator();
         while (iterator.hasNext()) {
-            Map.Entry<VehicleEntity, EntityTickTicketState> entry = iterator.next();
+            Map.Entry<VehicleEntity, EntityChunkTicketState> entry = iterator.next();
             if (activeVehicles.contains(entry.getKey())) {
                 continue;
             }
-            EntityTickTicketState state = entry.getValue();
+            EntityChunkTicketState state = entry.getValue();
             DistanceManager distanceManager = ((ServerChunkCacheInvoker) state.chunkSource())
                     .iacruise$getDistanceManager();
-            removeEntityTickingTicket(distanceManager, state);
+            removeEntityChunkTicket(distanceManager, state);
             distanceManager.runAllUpdates(state.chunkSource().chunkMap);
             iterator.remove();
         }
@@ -327,9 +331,6 @@ public final class CruiseChunkSendScheduler {
 
     private static void logEntityTickDiagnostics(MinecraftServer server,
                                                  Map<ServerPlayer, NavigationContext> activeByPlayer) {
-        if (!CruiseDebug.enabled()) {
-            return;
-        }
         Set<VehicleEntity> activeVehicles = java.util.Collections.newSetFromMap(new IdentityHashMap<>());
         for (NavigationContext navigation : activeByPlayer.values()) {
             activeVehicles.add(navigation.vehicle());
@@ -338,73 +339,56 @@ public final class CruiseChunkSendScheduler {
         for (VehicleEntity vehicle : activeVehicles) {
             ServerLevel level = (ServerLevel) vehicle.level();
             ServerChunkCache chunkSource = level.getChunkSource();
+            DistanceManager distanceManager = ((ServerChunkCacheInvoker) chunkSource).iacruise$getDistanceManager();
             long chunkKey = vehicle.chunkPosition().toLong();
             ChunkHolder holder = findLoadingHolder(chunkSource.chunkMap, chunkKey);
-            DistanceManager distanceManager = ((ServerChunkCacheInvoker) chunkSource).iacruise$getDistanceManager();
+            boolean alwaysTicking = vehicle.isAlwaysTicking();
             boolean entityListContains = ((ServerLevelAccessor) level).iacruise$getEntityTickList().contains(vehicle);
             boolean entityTickingRange = distanceManager.inEntityTickingRange(chunkKey);
-            boolean positionTicking = chunkSource.isPositionTicking(chunkKey);
-            boolean entitiesLoaded = level.areEntitiesLoaded(chunkKey);
-            boolean positionEntityTicking = level.isPositionEntityTicking(vehicle.blockPosition());
-            boolean entityFutureReady = false;
-            boolean entityFutureDone = false;
-            if (holder != null) {
-                var future = holder.getEntityTickingChunkFuture();
-                entityFutureDone = future.isDone();
-                if (entityFutureDone && !future.isCompletedExceptionally()) {
-                    var result = future.getNow(null);
-                    entityFutureReady = result != null && result.left().isPresent();
-                }
-            }
-            EntityTickTicketState ticketState = ENTITY_TICK_TICKETS.get(vehicle);
+            EntityChunkTicketState ticketState = ENTITY_CHUNK_TICKETS.get(vehicle);
             boolean ownsEntityTicket = ticketState != null && ticketState.chunkKeys().contains(chunkKey);
             String holderStatus = holder == null ? "missing" : holder.getFullStatus().toString();
-            String signature = entityListContains + ":" + entityTickingRange + ":" + positionTicking + ":"
-                    + entitiesLoaded + ":" + positionEntityTicking + ":" + entityFutureDone + ":"
-                    + entityFutureReady + ":" + ownsEntityTicket + ":" + holderStatus + ":" + vehicle.isRemoved();
+            String signature = alwaysTicking + ":" + entityListContains + ":" + entityTickingRange + ":"
+                    + ownsEntityTicket + ":" + holderStatus + ":" + vehicle.isRemoved();
             EntityTickDiagnostic previous = ENTITY_TICK_DIAGNOSTICS.get(vehicle);
             boolean progressed = previous == null || previous.vehicleTick() != vehicle.tickCount;
             int stalledTicks = progressed ? 0 : previous.stalledTicks() + 1;
-            String state = !entityListContains ? "not-in-entity-tick-list"
-                    : (!entityTickingRange ? "not-in-entity-ticking-range"
-                    : (progressed ? "ticking" : "eligible-but-tick-not-observed"));
-            boolean recovered = previous != null && previous.stalledTicks() >= 20 && progressed;
+            String state = entityTickState(alwaysTicking, entityListContains, entityTickingRange, progressed);
             boolean changed = previous == null || !signature.equals(previous.signature());
-            boolean periodicWarning = stalledTicks >= 20
-                    && (previous == null || serverTick - previous.lastLoggedServerTick() >= 20);
-            boolean periodicInfo = progressed
-                    && (previous == null || serverTick - previous.lastLoggedServerTick() >= 20);
-            if (changed || recovered || periodicWarning || periodicInfo) {
-                String message = "[CruiseEntityTick] serverTick={}, vehicleId={}, vehicleTick={}, stalledTicks={}, "
-                        + "chunk={}, reason={}, entityTickList={}, entityTickingRange={}, positionTicking={}, "
-                        + "entitiesLoaded={}, positionEntityTicking={}, entityFutureDone={}, entityFutureReady={}, "
-                        + "holderStatus={}, holderTicketLevel={}, entityTicketOwned={}, removed={}, passengers={}, pilot={}";
-                if (stalledTicks >= 20) {
-                    ImmersiveAircraftCruise.LOGGER.warn(message, serverTick, vehicle.getId(), vehicle.tickCount,
-                            stalledTicks, vehicle.chunkPosition(), state, entityListContains, entityTickingRange,
-                            positionTicking, entitiesLoaded, positionEntityTicking, entityFutureDone,
-                            entityFutureReady, holderStatus,
-                            holder == null ? -1 : holder.getTicketLevel(), ownsEntityTicket, vehicle.isRemoved(),
-                            vehicle.getPassengers().size(), vehicle.getControllingPassenger());
+            boolean recovered = progressed && previous != null && previous.stalledTicks() > 0;
+            boolean stalled = stalledTicks >= 20 && stalledTicks % 20 == 0;
+            if (stalled || changed || recovered) {
+                Object[] arguments = {serverTick, vehicle.getId(), vehicle.tickCount, stalledTicks,
+                        vehicle.chunkPosition(), state, alwaysTicking, entityListContains, entityTickingRange,
+                        holderStatus, holder == null ? -1 : holder.getTicketLevel(), ownsEntityTicket,
+                        vehicle.isRemoved(), vehicle.getPassengers().size(), vehicle.getControllingPassenger()};
+                if (stalled) {
+                    ImmersiveAircraftCruise.LOGGER.warn(ENTITY_TICK_MESSAGE, arguments);
                 } else {
-                    CruiseDebug.info(ImmersiveAircraftCruise.LOGGER, message, serverTick, vehicle.getId(),
-                            vehicle.tickCount, stalledTicks, vehicle.chunkPosition(), state, entityListContains,
-                            entityTickingRange, positionTicking, entitiesLoaded, positionEntityTicking,
-                            entityFutureDone, entityFutureReady, holderStatus,
-                            holder == null ? -1 : holder.getTicketLevel(), ownsEntityTicket, vehicle.isRemoved(),
-                            vehicle.getPassengers().size(), vehicle.getControllingPassenger());
+                    CruiseDebug.info(ImmersiveAircraftCruise.LOGGER, ENTITY_TICK_MESSAGE, arguments);
                 }
-                ENTITY_TICK_DIAGNOSTICS.put(vehicle,
-                        new EntityTickDiagnostic(vehicle.tickCount, stalledTicks, serverTick, signature));
-            } else {
-                ENTITY_TICK_DIAGNOSTICS.put(vehicle,
-                        new EntityTickDiagnostic(vehicle.tickCount, stalledTicks,
-                                previous.lastLoggedServerTick(), signature));
             }
+            ENTITY_TICK_DIAGNOSTICS.put(vehicle,
+                    new EntityTickDiagnostic(vehicle.tickCount, stalledTicks, signature));
         }
     }
 
-    private static boolean requiresEntityTicking(VehicleEntity vehicle) {
+    private static String entityTickState(boolean alwaysTicking, boolean entityListContains,
+                                          boolean entityTickingRange, boolean progressed) {
+        if (!alwaysTicking) {
+            return "not-always-ticking";
+        }
+        if (!entityListContains) {
+            return "not-in-entity-tick-list";
+        }
+        if (!entityTickingRange) {
+            return "out-of-entity-ticking-range";
+        }
+        return progressed ? "ticking" : "eligible-but-tick-not-observed";
+    }
+
+    /** Only an actively piloted aircraft flying a preload route needs its own chunk kept loaded. */
+    private static boolean requiresEntityChunkTicket(VehicleEntity vehicle) {
         if (vehicle.level().isClientSide()
                 || !CruiseController.hasCruiseModule(vehicle)
                 || !(vehicle.getControllingPassenger() instanceof ServerPlayer)) {
@@ -417,23 +401,23 @@ public final class CruiseChunkSendScheduler {
                 && route.getSelectedEntry().loadingMode() != CruiseRoute.RouteLoadingMode.VANILLA;
     }
 
-    private static void releaseEntityTickingTicket(VehicleEntity vehicle, EntityTickTicketState state) {
+    private static void releaseEntityChunkTicket(VehicleEntity vehicle, EntityChunkTicketState state) {
         DistanceManager distanceManager = ((ServerChunkCacheInvoker) state.chunkSource())
                 .iacruise$getDistanceManager();
-        removeEntityTickingTicket(distanceManager, state);
-        ENTITY_TICK_TICKETS.remove(vehicle);
+        removeEntityChunkTicket(distanceManager, state);
+        ENTITY_CHUNK_TICKETS.remove(vehicle);
         distanceManager.runAllUpdates(state.chunkSource().chunkMap);
     }
 
-    private static void removeEntityTickingTicket(DistanceManager distanceManager, EntityTickTicketState state) {
+    private static void removeEntityChunkTicket(DistanceManager distanceManager, EntityChunkTicketState state) {
         for (long chunkKey : state.chunkKeys()) {
-            removeEntityTickingTicket(distanceManager, new ChunkPos(chunkKey), state.vehicleId());
+            removeEntityChunkTicket(distanceManager, new ChunkPos(chunkKey), state.vehicleId());
         }
     }
 
-    private static void removeEntityTickingTicket(DistanceManager distanceManager, ChunkPos chunkPos, int vehicleId) {
-        distanceManager.removeTicket(ROUTE_ENTITY_TICK_TICKET, chunkPos,
-                ROUTE_ENTITY_TICK_TICKET_LEVEL, vehicleId);
+    private static void removeEntityChunkTicket(DistanceManager distanceManager, ChunkPos chunkPos, int vehicleId) {
+        distanceManager.removeTicket(ROUTE_ENTITY_CHUNK_TICKET, chunkPos,
+                ROUTE_ENTITY_CHUNK_TICKET_LEVEL, vehicleId);
     }
 
     /**
@@ -732,7 +716,7 @@ public final class CruiseChunkSendScheduler {
         NETWORK_STATES.clear();
         PENDING_TELEPORTS.clear();
         CONTEXT_STATUSES.clear();
-        ENTITY_TICK_TICKETS.clear();
+        ENTITY_CHUNK_TICKETS.clear();
         ENTITY_TICK_DIAGNOSTICS.clear();
         CACHE_INVALIDATIONS.clear();
         for (LoadingState state : LOADING_STATES.values()) {
@@ -1056,11 +1040,10 @@ public final class CruiseChunkSendScheduler {
                                      double anchorX, double anchorY, double anchorZ) {
     }
 
-    private record EntityTickTicketState(ServerChunkCache chunkSource, LinkedHashSet<Long> chunkKeys, int vehicleId) {
+    private record EntityChunkTicketState(ServerChunkCache chunkSource, LinkedHashSet<Long> chunkKeys, int vehicleId) {
     }
 
-    private record EntityTickDiagnostic(int vehicleTick, int stalledTicks,
-                                        long lastLoggedServerTick, String signature) {
+    private record EntityTickDiagnostic(int vehicleTick, int stalledTicks, String signature) {
     }
 
     private record PendingTeleport(VehicleEntity vehicle, double targetX, double targetY, double targetZ,

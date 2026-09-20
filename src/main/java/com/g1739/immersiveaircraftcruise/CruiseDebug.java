@@ -11,7 +11,7 @@ import org.slf4j.Logger;
  */
 public final class CruiseDebug {
     /** Temporary developer switch. Set false before producing a clean release jar. */
-    public static final boolean ENABLED = true;
+    public static final boolean ENABLED = false;
 
     private CruiseDebug() {
     }

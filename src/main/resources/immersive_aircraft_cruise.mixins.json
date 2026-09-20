@@ -10,6 +10,7 @@
     "ChunkMapInvoker",
     "ChunkMapMixin",
     "LevelChunkMixin",
+    "EntityAlwaysTickingMixin",
     "EngineVehicleMixin",
     "EngineVehicleAccessor",
     "ServerLevelAccessor",

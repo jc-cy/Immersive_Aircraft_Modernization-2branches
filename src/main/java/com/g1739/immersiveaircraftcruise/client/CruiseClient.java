@@ -323,15 +323,17 @@ public final class CruiseClient {
             if (!status.equals(lastClientContextStatus)
                     || lastClientContextDiagnosticTick == Long.MIN_VALUE
                     || gameTime - lastClientContextDiagnosticTick >= 20L) {
+                String rootState = describeRootState(root);
                 ImmersiveAircraftCruise.LOGGER.warn(
                         "[CruiseChunks][Client] flight context inactive: status={}, playerChunk={}, "
-                                + "playerPos={}, rootId={}, rootChunk={}, gameTime={}, thread={}",
+                                + "playerPos={}, rootId={}, rootChunk={}, rootState=[{}], gameTime={}, thread={}",
                         status,
                         minecraft.player == null ? "none" : minecraft.player.chunkPosition(),
                         minecraft.player == null ? "none" : String.format("%.2f/%.2f/%.2f",
                                 minecraft.player.getX(), minecraft.player.getY(), minecraft.player.getZ()),
                         root == null ? -1 : root.getId(),
                         root == null ? "none" : new ChunkPos(root.blockPosition()),
+                        rootState,
                         gameTime,
                         Thread.currentThread().getName());
                 lastClientContextStatus = status;
@@ -429,5 +431,32 @@ public final class CruiseClient {
             CruiseController.stopNavigationEffects(vehicle);
             CruiseController.clearCruiseInputs(vehicle);
         }
+    }
+
+    /**
+     * A ridden aircraft is rendered from the client entity's own rotation and IA's damage wobble, so a
+     * shaking model is diagnosed from those two sources plus the pilot/health state they depend on.
+     */
+    private static String describeRootState(Entity root) {
+        if (root == null) {
+            return "none";
+        }
+        String base = String.format(
+                "pos=%.2f/%.2f/%.2f, yaw=%.1f/%.1f, pitch=%.1f/%.1f, motion=%.3f/%.3f/%.3f, tickCount=%d, "
+                        + "onGround=%s, horizontalCollision=%s, verticalCollision=%s, locallyControlled=%s, "
+                        + "controller=%s, alwaysTicking=%s",
+                root.getX(), root.getY(), root.getZ(), root.getYRot(), root.yRotO,
+                root.getXRot(), root.xRotO,
+                root.getDeltaMovement().x, root.getDeltaMovement().y, root.getDeltaMovement().z,
+                root.tickCount, root.onGround(), root.horizontalCollision, root.verticalCollision,
+                root.isControlledByLocalInstance(),
+                root.getControllingPassenger() == null ? "none" : root.getControllingPassenger().getId(),
+                root.isAlwaysTicking());
+        if (!(root instanceof VehicleEntity vehicle)) {
+            return base;
+        }
+        return base + String.format(", health=%.3f, wobble=%d/%.2f/%d",
+                vehicle.getHealth(), vehicle.getDamageWobbleTicks(),
+                vehicle.getDamageWobbleStrength(), vehicle.getDamageWobbleSide());
     }
 }

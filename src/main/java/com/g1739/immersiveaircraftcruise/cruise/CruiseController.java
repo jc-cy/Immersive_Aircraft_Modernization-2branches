@@ -289,7 +289,7 @@ public final class CruiseController {
         if (vehicle == null || vehicle.level().isClientSide() || !hasCruiseModule(vehicle)) {
             return;
         }
-        CruiseChunkSendScheduler.updateEntityTickingTicket(vehicle);
+        CruiseChunkSendScheduler.updateEntityChunkTicket(vehicle);
         int corrected = 0;
         for (Entity passenger : vehicle.getPassengers()) {
             corrected += synchronizePassengerTree(vehicle, passenger, trigger);
