@@ -5,13 +5,18 @@ import com.g1739.immersiveaircraftcruise.ImmersiveAircraftCruise;
 import com.g1739.immersiveaircraftcruise.mixin.ChunkHolderAccessor;
 import com.g1739.immersiveaircraftcruise.mixin.ChunkMapInvoker;
 import com.g1739.immersiveaircraftcruise.mixin.ServerChunkCacheInvoker;
+import com.g1739.immersiveaircraftcruise.mixin.ServerEntityBroadcast;
 import com.g1739.immersiveaircraftcruise.mixin.ServerLevelAccessor;
+import com.g1739.immersiveaircraftcruise.mixin.TrackedEntityResync;
 import com.g1739.immersiveaircraftcruise.network.CruiseNetwork;
 import com.g1739.immersiveaircraftcruise.network.UpdateCruiseRoutePacket;
 import immersive_aircraft.entity.VehicleEntity;
 import net.minecraft.network.protocol.game.ClientboundLevelChunkWithLightPacket;
+import net.minecraft.network.protocol.game.ClientboundMoveVehiclePacket;
+import net.minecraft.network.protocol.game.ClientboundSetPassengersPacket;
 import net.minecraft.network.protocol.game.ClientboundSetChunkCacheRadiusPacket;
 import net.minecraft.server.MinecraftServer;
+import net.minecraft.server.level.ChunkLevel;
 import net.minecraft.server.level.ChunkHolder;
 import net.minecraft.server.level.ChunkMap;
 import net.minecraft.server.level.ChunkTaskPriorityQueueSorter;
@@ -20,6 +25,7 @@ import net.minecraft.server.level.ServerChunkCache;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.server.level.TicketType;
+import net.minecraft.server.level.FullChunkStatus;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.phys.Vec3;
 import net.minecraft.world.level.ChunkPos;
@@ -43,6 +49,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.HashSet;
+import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 
 public final class CruiseChunkSendScheduler {
@@ -59,14 +66,27 @@ public final class CruiseChunkSendScheduler {
     /** Keep the distant corridor ticketed while the separate FULL ticket supplies terrain packets. */
     private static final int ROUTE_PRELOAD_TICKET_LEVEL = 34;
     private static final int ROUTE_FULL_TICKET_LEVEL = 33;
-    /** Keep the aircraft's current physical chunk loaded; its ticking comes from Entity#isAlwaysTicking. */
+    /**
+     * Keep the chunk an occupied aircraft sits in loaded, so its terrain is available and the vehicle
+     * entity itself is not removed with the chunk.
+     *
+     * <p>Deliberately not an entity-ticking ticket: entity ticking comes from
+     * {@code Entity#isAlwaysTicking} and the client's view of the aircraft comes from
+     * {@link #broadcastAircraftState}. Keeping the aircraft inside an entity-ticking chunk cannot be
+     * guaranteed at cruise speed - the ticket needs the chunk-status pipeline to catch up while the
+     * aircraft crosses a chunk every two to three ticks - and making the whole chunk tick would tick
+     * everything else inside it too.
+     */
     private static final int ROUTE_ENTITY_CHUNK_TICKET_LEVEL = 33;
     /** The complete route look-ahead must be FULL so the aircraft never outruns the custom stream. */
     private static final int ROUTE_FULL_SLICE_COUNT = ROUTE_LOOKAHEAD_CHUNKS + 1;
     /** Extra acceleration is available once more than ten route chunks are FULL. */
     private static final int ROUTE_ACCELERATION_MIN_FULL_CHUNKS = 10;
-    /** The client applies at most one full route packet each tick. */
+    /** A route packet that has not been acknowledged for this long is sent again. */
     private static final long ROUTE_PACKET_ACK_TIMEOUT_TICKS = 80L;
+    /** Warn when an occupied aircraft moved this long without a single state broadcast. */
+    private static final int BROADCAST_GAP_TICKS = 40;
+    private static final double BROADCAST_GAP_MIN_BLOCKS = 1.0d;
     private static final int DIAGNOSTIC_INTERVAL_TICKS = 20;
     private static final String ENTITY_TICK_MESSAGE =
             "[CruiseEntityTick] serverTick={}, vehicleId={}, vehicleTick={}, stalledTicks={}, chunk={}, reason={}, "
@@ -84,6 +104,13 @@ public final class CruiseChunkSendScheduler {
     private static final Map<ChunkMap, LoadingState> LOADING_STATES = new IdentityHashMap<>();
     private static final Map<VehicleEntity, EntityChunkTicketState> ENTITY_CHUNK_TICKETS = new IdentityHashMap<>();
     private static final Map<VehicleEntity, EntityTickDiagnostic> ENTITY_TICK_DIAGNOSTICS = new IdentityHashMap<>();
+    /** Last tick on which the aircraft's position/passenger packets actually went out. */
+    private static final Map<VehicleEntity, BroadcastMark> LAST_BROADCAST = new IdentityHashMap<>();
+    /** Who rode which aircraft, so a same-dimension chunk reload can put them back. */
+    private static final Map<UUID, RideMemory> RIDE_MEMORY = new HashMap<>();
+    private static final long RIDE_MEMORY_TTL_TICKS = 20L * 60L * 5L;
+    private static final long RIDE_RESYNC_COOLDOWN_TICKS = 20L;
+    private static final Map<ServerPlayer, Long> RIDE_RESYNC_COOLDOWNS = new IdentityHashMap<>();
     private static final Map<ServerLevel, Set<Long>> CACHE_INVALIDATIONS = new ConcurrentHashMap<>();
 
     private CruiseChunkSendScheduler() {
@@ -94,11 +121,234 @@ public final class CruiseChunkSendScheduler {
         MinecraftForge.EVENT_BUS.addListener(CruiseChunkSendScheduler::onEntityTeleport);
         MinecraftForge.EVENT_BUS.addListener(CruiseChunkSendScheduler::onPlayerChangedDimension);
         MinecraftForge.EVENT_BUS.addListener(CruiseChunkSendScheduler::onPlayerLoggedIn);
-        MinecraftForge.EVENT_BUS.addListener(CruiseChunkSendScheduler::onPlayerStartTracking);
         MinecraftForge.EVENT_BUS.addListener(CruiseChunkSendScheduler::onPlayerLoggedOut);
         MinecraftForge.EVENT_BUS.addListener(CruiseChunkSendScheduler::onServerStopped);
+        MinecraftForge.EVENT_BUS.addListener(CruiseChunkSendScheduler::onEntityJoinLevel);
         CruiseDebug.info(ImmersiveAircraftCruise.LOGGER, "[CruiseChunks] scheduler registered");
     }
+
+    /**
+     * Single exit for every change of who rides a cruise aircraft.
+     *
+     * <p>Called from the {@code Entity} mixin on mount, dismount and vehicle removal. It records the
+     * ride for a later same-dimension restore and pushes the authoritative passenger list straight to
+     * the affected player, so a teleport, a spectator switch, the chunk system unloading the vehicle
+     * or IA's own "kick the first passenger" can no longer leave a client riding an aircraft the
+     * server has already dismounted it from.
+     */
+    public static void onRidingStateChanged(VehicleEntity vehicle, ServerPlayer player, boolean mounted) {
+        Set<UUID> passengers = new HashSet<>(storedRidePassengers(vehicle));
+        if (mounted) {
+            passengers.add(player.getUUID());
+        } else {
+            passengers.remove(player.getUUID());
+        }
+        RIDE_MEMORY.put(vehicle.getUUID(),
+                new RideMemory(vehicle.level().dimension(), passengers, player.server.getTickCount()));
+        sendPassengerList(vehicle);
+        if (mounted) {
+            // Boarding is the moment a rider must end up with the aircraft's current route and upgrades;
+            // nothing is guessed from what the client happened to track before.
+            sendAuthoritativeRoute(player, vehicle);
+        } else {
+            // Vanilla needs nothing here because a dismounting client and the server already agree on the
+            // rider's position. Cruise flight is the exception: the client's own copy of the aircraft can
+            // be tens of blocks from the server's (client-predicted pilot, interpolation, stalls), so the
+            // authoritative position is handed over explicitly instead of letting the next move packet be
+            // corrected - which would look like an unexplained pull-back right after stepping off.
+            player.connection.teleport(player.getX(), player.getY(), player.getZ(),
+                    player.getYRot(), player.getXRot());
+        }
+        ImmersiveAircraftCruise.LOGGER.info(
+                "[CruiseRide] player={} {} vehicleId={}, passengers={}, tick={}",
+                player.getScoreboardName(), mounted ? "boarded" : "left",
+                vehicle.getId(), vehicle.getPassengers().size(), player.server.getTickCount());
+    }
+
+    private static Set<UUID> storedRidePassengers(VehicleEntity vehicle) {
+        RideMemory memory = RIDE_MEMORY.get(vehicle.getUUID());
+        return memory == null ? Set.of() : memory.passengerIds();
+    }
+
+    /**
+     * Pushes the authoritative passenger list to every rider the change affects.
+     *
+     * <p>The list is not decoration: {@code Entity#getFirstPassenger} is what decides who controls an
+     * aircraft on each client, and a client that still counts itself as the controller ignores the
+     * server's position updates for that aircraft entirely. Telling only the player whose own ride
+     * changed therefore leaves every other rider with a stale controller. On dismount the leaver is
+     * still in the list here, so one pass covers both the remaining riders and the player that left.
+     */
+    private static void sendPassengerList(VehicleEntity vehicle) {
+        ClientboundSetPassengersPacket packet = new ClientboundSetPassengersPacket(vehicle);
+        for (Entity passenger : vehicle.getPassengers()) {
+            if (passenger instanceof ServerPlayer rider) {
+                rider.connection.send(packet);
+            }
+        }
+    }
+
+    /**
+     * Repairs a runtime riding state reported by the client heartbeat check or the manual cruise key.
+     *
+     * <p>This is the only client-driven path left, and it is a validation against information the
+     * server already broadcasts every five ticks rather than a heuristic: the heartbeat names the
+     * aircraft the server counts the player on. Three outcomes, all resolved from server state:
+     *
+     * <ul>
+     *   <li>the server counts the player on that same aircraft - the client's own copy of it is what
+     *       is stale, so it is rebuilt from server state ({@link #rebuildAircraftView});</li>
+     *   <li>the server counts the player on another aircraft - that aircraft's view is rebuilt for
+     *       this client as well;</li>
+     *   <li>the server counts the player on nothing, but session memory still lists them on a loaded
+     *       aircraft in this dimension - they are put back on the seat.</li>
+     * </ul>
+     *
+     * <p>Anything else is ignored, and every outcome is rate limited per player.
+     */
+    public static void repairRideState(ServerPlayer player, int vehicleId) {
+        if (player == null || player.hasDisconnected()) {
+            return;
+        }
+        long serverTick = player.server.getTickCount();
+        Long previous = RIDE_RESYNC_COOLDOWNS.get(player);
+        if (previous != null && serverTick - previous < RIDE_RESYNC_COOLDOWN_TICKS) {
+            return;
+        }
+        RIDE_RESYNC_COOLDOWNS.put(player, serverTick);
+        // The client sends the aircraft it believes it is riding (0 when it believes it rides none).
+        // A riding client validates every five-tick heartbeat; the cruise key validates manually.
+        Entity root = player.getRootVehicle();
+        if (root instanceof VehicleEntity onboard && CruiseController.hasCruiseModule(onboard)) {
+            if (onboard.getId() != vehicleId) {
+                ImmersiveAircraftCruise.LOGGER.warn(
+                        "[CruiseRide] client reported {} while riding {}: player={}",
+                        vehicleId, onboard.getId(), player.getScoreboardName());
+            }
+            rebuildAircraftView(player, onboard);
+            return;
+        }
+        VehicleEntity remembered = rememberedVehicle(player);
+        if (remembered == null || player.isDeadOrDying()) {
+            return;
+        }
+        if (!player.startRiding(remembered, true)) {
+            return;
+        }
+        remembered.positionRider(player);
+        rebuildAircraftView(player, remembered);
+        ImmersiveAircraftCruise.LOGGER.warn(
+                "[CruiseRide] put a player back on the aircraft the client still rode: player={}, vehicleId={}",
+                player.getScoreboardName(), remembered.getId());
+    }
+
+    /**
+     * Rebuilds this client's copy of an aircraft the server already counts the player as riding.
+     *
+     * <p>This is the only repair the mod performs, and it has to rebuild rather than correct: a client
+     * that is not the controller never applies a position packet for the aircraft
+     * ({@code ClientboundMoveVehiclePacket} is applied only by a locally controlling client), and a
+     * client whose own state drifted keeps the aircraft where it was - visible under the passenger and
+     * shaking, while the server-side aircraft flies on. Dropping the pairing makes the client discard
+     * that copy, and re-pairing hands it a fresh entity at the server position together with the
+     * authoritative passenger list. Nothing here is inferred from the request.
+     */
+    private static void rebuildAircraftView(ServerPlayer player, VehicleEntity vehicle) {
+        ServerLevel level = (ServerLevel) vehicle.level();
+        ServerChunkCache chunkSource = level.getChunkSource();
+        Object tracked = ((ChunkMapInvoker) chunkSource.chunkMap)
+                .iacruise$getEntityMap().get(vehicle.getId());
+        if (tracked instanceof TrackedEntityResync resync) {
+            resync.iacruise$removePlayer(player);
+            resync.iacruise$updatePlayer(player);
+        }
+        sendPassengerList(vehicle);
+        // The rebuild replaces this client's aircraft entity, and the route lives on that entity, so the
+        // authoritative route travels with it - otherwise a repair would leave the client showing the
+        // navigation it just started as stopped.
+        sendAuthoritativeRoute(player, vehicle);
+        player.connection.send(new ClientboundMoveVehiclePacket(vehicle));
+        chunkSource.move(player);
+        ImmersiveAircraftCruise.LOGGER.info(
+                "[CruiseRide] re-sent aircraft state: player={}, vehicleId={}, riders={}",
+                player.getScoreboardName(), vehicle.getId(), vehicle.getPassengers().size());
+    }
+
+    /** Finds the aircraft the session memory still lists this player as riding, same dimension. */
+    private static VehicleEntity rememberedVehicle(ServerPlayer player) {
+        for (Map.Entry<UUID, RideMemory> entry : RIDE_MEMORY.entrySet()) {
+            RideMemory memory = entry.getValue();
+            if (!memory.passengerIds().contains(player.getUUID())
+                    || !player.serverLevel().dimension().equals(memory.dimension())) {
+                continue;
+            }
+            if (player.serverLevel().getEntity(entry.getKey()) instanceof VehicleEntity vehicle
+                    && CruiseController.hasCruiseModule(vehicle)) {
+                return vehicle;
+            }
+        }
+        return null;
+    }
+
+    /** Captures the current ride before the chunk system removes the vehicle and ejects everyone. */
+    public static void rememberRide(VehicleEntity vehicle) {
+        Set<UUID> passengers = new HashSet<>();
+        for (Entity passenger : vehicle.getPassengers()) {
+            if (passenger instanceof ServerPlayer player) {
+                passengers.add(player.getUUID());
+            }
+        }
+        if (passengers.isEmpty()) {
+            return;
+        }
+        MinecraftServer server = vehicle.getServer();
+        RIDE_MEMORY.put(vehicle.getUUID(), new RideMemory(vehicle.level().dimension(), passengers,
+                server == null ? 0L : server.getTickCount()));
+    }
+
+    /**
+     * Restores a ride when the same entity is loaded again in the same dimension: only players who
+     * are still online, in that dimension and next to the aircraft are put back. Nothing is stored
+     * across server sessions, so re-joining keeps vanilla behaviour.
+     */
+    private static void onEntityJoinLevel(net.minecraftforge.event.entity.EntityJoinLevelEvent event) {
+        if (event.getLevel().isClientSide() || !(event.getEntity() instanceof VehicleEntity vehicle)
+                || !CruiseController.hasCruiseModule(vehicle)) {
+            return;
+        }
+        RideMemory memory = RIDE_MEMORY.get(vehicle.getUUID());
+        if (memory == null || memory.passengerIds().isEmpty()
+                || !event.getLevel().dimension().equals(memory.dimension())) {
+            return;
+        }
+        MinecraftServer server = vehicle.getServer();
+        if (server == null) {
+            return;
+        }
+        if (server.getTickCount() - memory.tick() > RIDE_MEMORY_TTL_TICKS) {
+            RIDE_MEMORY.remove(vehicle.getUUID());
+            return;
+        }
+        for (UUID id : memory.passengerIds()) {
+            ServerPlayer player = server.getPlayerList().getPlayer(id);
+            // The ride is only remembered for players whose ride was ended collaterally by a chunk
+            // unload, so no distance test is needed: a passenger whose position sync lagged behind
+            // must still be put back. Riding something else or being dead are the only real conflicts.
+            if (player == null || player.level() != event.getLevel()
+                    || player.isDeadOrDying() || player.getRootVehicle() != player) {
+                continue;
+            }
+            if (player.startRiding(vehicle, true)) {
+                vehicle.positionRider(player);
+                player.serverLevel().getChunkSource().move(player);
+                ImmersiveAircraftCruise.LOGGER.info(
+                        "[CruiseRide] restored ride after the aircraft was loaded again: "
+                                + "player={}, vehicleUuid={}",
+                        player.getScoreboardName(), vehicle.getUUID());
+            }
+        }
+    }
+
 
     public static void invalidatePayloadCache(ServerLevel level, long chunkKey) {
         CACHE_INVALIDATIONS.computeIfAbsent(level, ignored -> ConcurrentHashMap.newKeySet()).add(chunkKey);
@@ -282,6 +532,41 @@ public final class CruiseChunkSendScheduler {
         distanceManager.runAllUpdates(chunkMap);
     }
 
+    /**
+     * Asks vanilla to broadcast this aircraft's position and passenger list every server tick.
+     *
+     * <p>{@code ChunkMap} only runs {@code ServerEntity#sendChanges} when the entity's section changed
+     * or its chunk is in the entity-ticking range, and the second half is a race the aircraft wins:
+     * the ticket needs the chunk-status pipeline to catch up while a cruise aircraft crosses a chunk
+     * every few ticks. Calling the same broadcast function directly makes the client's view
+     * independent of that race, and it costs less than turning the whole chunk entity-ticking.
+     */
+    private static void broadcastAircraftState(VehicleEntity vehicle) {
+        if (vehicle.level().isClientSide() || !requiresEntityChunkTicket(vehicle)) {
+            return;
+        }
+        ServerChunkCache chunkSource = ((ServerLevel) vehicle.level()).getChunkSource();
+        Object tracked = ((ChunkMapInvoker) chunkSource.chunkMap)
+                .iacruise$getEntityMap().get(vehicle.getId());
+        if (tracked instanceof TrackedEntityResync access
+                && access.iacruise$getServerEntity() instanceof ServerEntityBroadcast broadcast) {
+            broadcast.iacruise$sendChanges();
+        }
+    }
+
+    /**
+     * Called from the tracking broadcast itself, so the diagnostics see the aircraft's state actually
+     * leaving the server instead of only trusting the condition that should have allowed it.
+     */
+    public static void noteBroadcast(Entity entity) {
+        if (entity instanceof VehicleEntity vehicle
+                && !vehicle.level().isClientSide()
+                && CruiseController.hasCruiseModule(vehicle)) {
+            LAST_BROADCAST.put(vehicle, new BroadcastMark(vehicle.tickCount,
+                    vehicle.getX(), vehicle.getY(), vehicle.getZ()));
+        }
+    }
+
     private static void onServerTick(TickEvent.ServerTickEvent event) {
         if (event.phase != TickEvent.Phase.END) {
             return;
@@ -289,12 +574,13 @@ public final class CruiseChunkSendScheduler {
         applyPendingTeleports(event.getServer());
         processCacheInvalidations();
         Map<ServerPlayer, NavigationContext> activeByPlayer = activeNavigationContexts(event.getServer());
-        updateEntityChunkTickets(activeByPlayer);
+        updateEntityChunkTickets(event.getServer(), activeByPlayer);
         logEntityTickDiagnostics(event.getServer(), activeByPlayer);
         updateAccelerationPermits(activeByPlayer);
         updateLoadingPriorities(activeByPlayer);
         updateNetworkQueues(event.getServer(), activeByPlayer);
     }
+
 
     private static void updateAccelerationPermits(Map<ServerPlayer, NavigationContext> activeByPlayer) {
         Set<NavigationContext> activeFlights = java.util.Collections.newSetFromMap(new IdentityHashMap<>());
@@ -304,19 +590,36 @@ public final class CruiseChunkSendScheduler {
         }
     }
 
-    private static void updateEntityChunkTickets(Map<ServerPlayer, NavigationContext> activeByPlayer) {
+    private static void updateEntityChunkTickets(MinecraftServer server,
+                                                 Map<ServerPlayer, NavigationContext> activeByPlayer) {
         Set<VehicleEntity> activeVehicles = java.util.Collections.newSetFromMap(new IdentityHashMap<>());
         for (NavigationContext navigation : activeByPlayer.values()) {
             activeVehicles.add(navigation.vehicle());
         }
+        // Occupied aircraft keep their ticket even when navigation is not running (for example right
+        // after a collision stopped it); releasing it there is what let the chunk - and the vehicle
+        // entity with its passengers - unload.
+        for (ServerPlayer player : server.getPlayerList().getPlayers()) {
+            if (player.getRootVehicle() instanceof VehicleEntity vehicle) {
+                activeVehicles.add(vehicle);
+                if (CruiseController.hasCruiseModule(vehicle)) {
+                    // Vanilla moves a rider's chunk-tracking centre only for the vehicle controller
+                    // (handleMoveVehicle); a passenger's centre otherwise stays where they boarded, so
+                    // at cruise speed their client view window ends up hundreds of blocks behind the
+                    // aircraft and every chunk packet for the area it flies over is refused.
+                    player.serverLevel().getChunkSource().move(player);
+                }
+            }
+        }
         for (VehicleEntity vehicle : activeVehicles) {
             updateEntityChunkTicket(vehicle);
+            broadcastAircraftState(vehicle);
         }
 
         Iterator<Map.Entry<VehicleEntity, EntityChunkTicketState>> iterator = ENTITY_CHUNK_TICKETS.entrySet().iterator();
         while (iterator.hasNext()) {
             Map.Entry<VehicleEntity, EntityChunkTicketState> entry = iterator.next();
-            if (activeVehicles.contains(entry.getKey())) {
+            if (requiresEntityChunkTicket(entry.getKey())) {
                 continue;
             }
             EntityChunkTicketState state = entry.getValue();
@@ -326,7 +629,6 @@ public final class CruiseChunkSendScheduler {
             distanceManager.runAllUpdates(state.chunkSource().chunkMap);
             iterator.remove();
         }
-        ENTITY_TICK_DIAGNOSTICS.keySet().removeIf(vehicle -> !activeVehicles.contains(vehicle));
     }
 
     private static void logEntityTickDiagnostics(MinecraftServer server,
@@ -368,9 +670,44 @@ public final class CruiseChunkSendScheduler {
                     CruiseDebug.info(ImmersiveAircraftCruise.LOGGER, ENTITY_TICK_MESSAGE, arguments);
                 }
             }
+            logBroadcastGap(vehicle);
             ENTITY_TICK_DIAGNOSTICS.put(vehicle,
                     new EntityTickDiagnostic(vehicle.tickCount, stalledTicks, signature));
         }
+        ENTITY_TICK_DIAGNOSTICS.keySet().removeIf(vehicle ->
+                vehicle.isRemoved() || !activeVehicles.contains(vehicle));
+        LAST_BROADCAST.keySet().removeIf(vehicle ->
+                vehicle.isRemoved() || !activeVehicles.contains(vehicle));
+    }
+
+    /**
+     * Warns when an occupied aircraft moved without a single state broadcast, which is the server-side
+     * result the client needs: it is independent of why the broadcast was missing (no observers paired,
+     * a suppressed tracking pass, or anything else).
+     */
+    private static void logBroadcastGap(VehicleEntity vehicle) {
+        if (vehicle.getPassengers().isEmpty()) {
+            LAST_BROADCAST.remove(vehicle);
+            return;
+        }
+        BroadcastMark mark = LAST_BROADCAST.get(vehicle);
+        if (mark == null) {
+            LAST_BROADCAST.put(vehicle, new BroadcastMark(vehicle.tickCount,
+                    vehicle.getX(), vehicle.getY(), vehicle.getZ()));
+            return;
+        }
+        int gapTicks = vehicle.tickCount - mark.vehicleTick();
+        double moved = Math.abs(vehicle.getX() - mark.x())
+                + Math.abs(vehicle.getY() - mark.y())
+                + Math.abs(vehicle.getZ() - mark.z());
+        if (gapTicks < BROADCAST_GAP_TICKS || moved < BROADCAST_GAP_MIN_BLOCKS) {
+            return;
+        }
+        ImmersiveAircraftCruise.LOGGER.warn(
+                "[CruiseRide] aircraft state not broadcast: vehicleId={}, riders={}, gapTicks={}, movedBlocks={}",
+                vehicle.getId(), vehicle.getPassengers().size(), gapTicks, String.format("%.1f", moved));
+        LAST_BROADCAST.put(vehicle, new BroadcastMark(vehicle.tickCount,
+                vehicle.getX(), vehicle.getY(), vehicle.getZ()));
     }
 
     private static String entityTickState(boolean alwaysTicking, boolean entityListContains,
@@ -387,18 +724,28 @@ public final class CruiseChunkSendScheduler {
         return progressed ? "ticking" : "eligible-but-tick-not-observed";
     }
 
-    /** Only an actively piloted aircraft flying a preload route needs its own chunk kept loaded. */
+    /**
+     * Any module-equipped aircraft with a player aboard needs its own chunk kept loaded and ticking.
+     *
+     * <p>This deliberately does not depend on the navigation state. A collision stops navigation,
+     * and an earlier version released the aircraft's ticket at exactly that moment: the chunk could
+     * then unload, the vehicle entity was removed by the chunk system (`Entity#remove` ejects its
+     * passengers), and the player was dismounted server-side while the client - whose chunk cache
+     * had merely stopped ticking the entity - kept riding. When the chunk came back the entity was
+     * re-created and the client re-attached, which is the "dismount on impact, remount after the
+     * chunk loads again" cycle. Keeping the ticket while anyone is aboard removes the whole chain.
+     */
     private static boolean requiresEntityChunkTicket(VehicleEntity vehicle) {
         if (vehicle.level().isClientSide()
-                || !CruiseController.hasCruiseModule(vehicle)
-                || !(vehicle.getControllingPassenger() instanceof ServerPlayer)) {
+                || !CruiseController.hasCruiseModule(vehicle)) {
             return false;
         }
-        CruiseRoute route = CruiseController.currentRoute(vehicle);
-        return route.isEnabled()
-                && !route.isHoldingPattern()
-                && route.hasTarget()
-                && route.getSelectedEntry().loadingMode() != CruiseRoute.RouteLoadingMode.VANILLA;
+        for (Entity passenger : vehicle.getPassengers()) {
+            if (passenger instanceof ServerPlayer) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private static void releaseEntityChunkTicket(VehicleEntity vehicle, EntityChunkTicketState state) {
@@ -531,6 +878,7 @@ public final class CruiseChunkSendScheduler {
             CruiseController.handlePilotLoggedOut(player);
             stopPilotNavigation(player, "logout");
             PENDING_TELEPORTS.remove(player);
+            RIDE_RESYNC_COOLDOWNS.remove(player);
             NETWORK_STATES.remove(player);
             CONTEXT_STATUSES.remove(player);
         }
@@ -546,19 +894,12 @@ public final class CruiseChunkSendScheduler {
         }
     }
 
-    private static void onPlayerStartTracking(PlayerEvent.StartTracking event) {
-        if (event.getEntity() instanceof ServerPlayer player
-                && event.getTarget() instanceof VehicleEntity vehicle
-                && CruiseController.hasCruiseModule(vehicle)) {
-            sendAuthoritativeRoute(player, vehicle);
-        }
-    }
-
     private static void onPlayerChangedDimension(PlayerEvent.PlayerChangedDimensionEvent event) {
         if (event.getEntity() instanceof ServerPlayer player) {
             CruiseController.handlePilotLoggedOut(player);
             stopPilotNavigation(player, "dimension-change");
             PENDING_TELEPORTS.remove(player);
+            RIDE_RESYNC_COOLDOWNS.remove(player);
             NETWORK_STATES.remove(player);
             CONTEXT_STATUSES.remove(player);
         }
@@ -713,11 +1054,16 @@ public final class CruiseChunkSendScheduler {
     }
 
     private static void onServerStopped(ServerStoppedEvent event) {
+        // The preload screen owns the auto-slowdown switch, so every session starts from the safe default.
+        CruiseController.setPreloadAutoDeceleration(true);
         NETWORK_STATES.clear();
         PENDING_TELEPORTS.clear();
+        RIDE_RESYNC_COOLDOWNS.clear();
         CONTEXT_STATUSES.clear();
         ENTITY_CHUNK_TICKETS.clear();
         ENTITY_TICK_DIAGNOSTICS.clear();
+        LAST_BROADCAST.clear();
+        RIDE_MEMORY.clear();
         CACHE_INVALIDATIONS.clear();
         for (LoadingState state : LOADING_STATES.values()) {
             state.clear();
@@ -747,8 +1093,6 @@ public final class CruiseChunkSendScheduler {
             return null;
         }
         // The server-side vehicle is the movement authority used by the route controller.
-        // The ServerPlayer passenger can remain at its old position during client-predicted
-        // high-speed flight, so it must not be used as the route anchor or cache center.
         return new NavigationContext(vehicle, route,
                 vehicle.getX(), vehicle.getY(), vehicle.getZ());
     }
@@ -1044,6 +1388,14 @@ public final class CruiseChunkSendScheduler {
     }
 
     private record EntityTickDiagnostic(int vehicleTick, int stalledTicks, String signature) {
+    }
+
+    /** Where and when the aircraft's own state last reached a client. */
+    private record BroadcastMark(int vehicleTick, double x, double y, double z) {
+    }
+
+    private record RideMemory(net.minecraft.resources.ResourceKey<net.minecraft.world.level.Level> dimension,
+                              Set<UUID> passengerIds, long tick) {
     }
 
     private record PendingTeleport(VehicleEntity vehicle, double targetX, double targetY, double targetZ,

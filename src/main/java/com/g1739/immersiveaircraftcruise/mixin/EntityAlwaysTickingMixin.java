@@ -23,8 +23,22 @@ public abstract class EntityAlwaysTickingMixin {
     private void immersive_aircraft_cruise$alwaysTickPreloadAircraft(CallbackInfoReturnable<Boolean> cir) {
         if ((Object) this instanceof VehicleEntity vehicle
                 && !vehicle.level().isClientSide()
-                && CruiseModuleData.usesPreloadRoute(vehicle)) {
+                && (CruiseModuleData.usesPreloadRoute(vehicle) || iacruise$hasPlayerAboard(vehicle))) {
             cir.setReturnValue(true);
         }
+    }
+
+    /**
+     * An aircraft with a player aboard must keep ticking even when navigation is not running: a
+     * collision stops navigation, and a stopped aircraft that also stops ticking is exactly the
+     * frozen-entity state seen from the passenger side.
+     */
+    private boolean iacruise$hasPlayerAboard(VehicleEntity vehicle) {
+        for (Entity passenger : vehicle.getPassengers()) {
+            if (passenger instanceof net.minecraft.world.entity.player.Player) {
+                return true;
+            }
+        }
+        return false;
     }
 }

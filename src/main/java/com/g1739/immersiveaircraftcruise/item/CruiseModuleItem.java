@@ -1,6 +1,7 @@
 package com.g1739.immersiveaircraftcruise.item;
 
 import com.g1739.immersiveaircraftcruise.cruise.CruiseModuleData;
+import com.g1739.immersiveaircraftcruise.cruise.CruiseController;
 import com.g1739.immersiveaircraftcruise.network.CruiseNetwork;
 import com.g1739.immersiveaircraftcruise.network.OpenCruiseScreenPacket;
 import net.minecraft.ChatFormatting;
@@ -40,7 +41,8 @@ public class CruiseModuleItem extends Item {
         }
         if (player instanceof ServerPlayer serverPlayer) {
             CruiseNetwork.CHANNEL.send(PacketDistributor.PLAYER.with(() -> serverPlayer),
-                    new OpenCruiseScreenPacket(-1, CruiseModuleData.read(stack)));
+                    new OpenCruiseScreenPacket(-1, CruiseModuleData.read(stack), false,
+                            CruiseController.preloadAutoDeceleration()));
             return InteractionResultHolder.success(stack);
         }
         return InteractionResultHolder.fail(stack);
@@ -55,6 +57,8 @@ public class CruiseModuleItem extends Item {
                 Component.keybind("key.immersive_aircraft_cruise.toggle_cruise")));
         tooltip.add(Component.translatable("tooltip.immersive_aircraft_cruise.cruise_module_boost",
                 Component.translatable("tooltip.immersive_aircraft_cruise.overclock_mode").withStyle(ChatFormatting.GOLD)));
+        tooltip.add(Component.translatable("tooltip.immersive_aircraft_cruise.cruise_module_refresh",
+                Component.keybind("key.immersive_aircraft_cruise.refresh_ride")));
         super.appendHoverText(stack, level, tooltip, flag);
     }
 }

@@ -1,5 +1,6 @@
 package com.g1739.immersiveaircraftcruise.mixin;
 
+import com.g1739.immersiveaircraftcruise.cruise.CruiseChunkSendScheduler;
 import com.g1739.immersiveaircraftcruise.cruise.CruiseController;
 import net.minecraft.server.level.ServerEntity;
 import net.minecraft.server.level.ServerPlayer;
@@ -14,7 +15,10 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
 import java.util.Set;
 
-/** Keeps the cruise vehicle and all onboard players paired beyond normal tracking range. */
+/**
+ * Keeps the cruise vehicle and all onboard players paired beyond normal tracking range, and exposes
+ * the pairing primitives the repair path uses to rebuild one client's view of the aircraft.
+ */
 @Mixin(targets = "net.minecraft.server.level.ChunkMap$TrackedEntity")
 public abstract class TrackedEntityMixin {
     @Shadow
@@ -39,5 +43,11 @@ public abstract class TrackedEntityMixin {
             serverEntity.addPairing(player);
         }
         ci.cancel();
+    }
+
+    /** Records the aircraft state that actually goes out, for the server-side broadcast gap check. */
+    @Inject(method = {"broadcast", "broadcastAndSend"}, at = @At("HEAD"))
+    private void iacruise$noteBroadcast(net.minecraft.network.protocol.Packet<?> packet, CallbackInfo ci) {
+        CruiseChunkSendScheduler.noteBroadcast(entity);
     }
 }

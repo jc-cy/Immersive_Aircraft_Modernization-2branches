@@ -9,9 +9,12 @@ import net.minecraftforge.network.NetworkEvent;
 
 import java.util.function.Supplier;
 
-public record UpdateCruiseFuelPacket(int entityId, CruiseFuelInfo fuelInfo) {
+public record UpdateCruiseFuelPacket(int entityId, double x, double y, double z, CruiseFuelInfo fuelInfo) {
     public void encode(FriendlyByteBuf buffer) {
         buffer.writeInt(entityId);
+        buffer.writeDouble(x);
+        buffer.writeDouble(y);
+        buffer.writeDouble(z);
         buffer.writeUtf(fuelInfo.amountText(), 32);
         buffer.writeInt(fuelInfo.remainingTicks());
         buffer.writeItem(fuelInfo.icon());
@@ -21,13 +24,15 @@ public record UpdateCruiseFuelPacket(int entityId, CruiseFuelInfo fuelInfo) {
 
     public static UpdateCruiseFuelPacket decode(FriendlyByteBuf buffer) {
         return new UpdateCruiseFuelPacket(buffer.readInt(),
+                buffer.readDouble(), buffer.readDouble(), buffer.readDouble(),
                 new CruiseFuelInfo(buffer.readUtf(32), buffer.readInt(), buffer.readItem(), buffer.readFloat(), buffer.readBoolean()));
     }
 
     public static void handle(UpdateCruiseFuelPacket packet, Supplier<NetworkEvent.Context> contextSupplier) {
         NetworkEvent.Context context = contextSupplier.get();
         context.enqueueWork(() -> DistExecutor.unsafeRunWhenOn(Dist.CLIENT,
-                () -> () -> ClientPacketHandlers.updateCruiseFuel(packet.entityId, packet.fuelInfo)));
+                () -> () -> ClientPacketHandlers.updateCruiseFuel(
+                        packet.entityId, packet.x, packet.y, packet.z, packet.fuelInfo)));
         context.setPacketHandled(true);
     }
 }

@@ -84,7 +84,8 @@ public class RequestOpenCruiseScreenPacket {
                         packet.currentIndex, packet.holdingPattern, packet.initialAltitudeReached, packet.startPoint).copy()
                         : CruiseController.currentRoute(vehicle).copy();
                 CruiseNetwork.CHANNEL.send(PacketDistributor.PLAYER.with(() -> player),
-                        new OpenCruiseScreenPacket(vehicle.getId(), route.copy(), !pilot));
+                        new OpenCruiseScreenPacket(vehicle.getId(), route.copy(), !pilot,
+                                CruiseController.preloadAutoDeceleration()));
             }
         });
         context.setPacketHandled(true);

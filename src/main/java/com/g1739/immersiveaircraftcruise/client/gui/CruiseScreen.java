@@ -6,6 +6,7 @@ import com.g1739.immersiveaircraftcruise.cruise.CruiseRoute;
 import com.g1739.immersiveaircraftcruise.cruise.CruiseVehicleAccess;
 import com.g1739.immersiveaircraftcruise.network.CruiseNetwork;
 import com.g1739.immersiveaircraftcruise.network.RouteStorageTarget;
+import com.g1739.immersiveaircraftcruise.network.SetPreloadDecelerationPacket;
 import com.g1739.immersiveaircraftcruise.network.SyncCruiseRoutePacket;
 import com.g1739.immersiveaircraftcruise.network.UpdateCruiseHudPacket;
 import immersive_aircraft.entity.VehicleEntity;
@@ -65,6 +66,7 @@ public class CruiseScreen extends Screen {
     private CruiseRoute.RouteLoadingMode loadingMode;
     private CruiseRoute.LandingMode landingMode;
     private Integer landingAltitude;
+    private boolean decelerateWhenChunksNotReady;
     private int scrollOffset;
     private EditBox routeNameBox;
     private EditBox defaultAltitudeBox;
@@ -77,15 +79,12 @@ public class CruiseScreen extends Screen {
     private int dragOffsetY;
     private int runtimeSelectedRoute = -1;
 
-    public CruiseScreen(int entityId, CruiseRoute route) {
-        this(entityId, route, false);
-    }
-
-    public CruiseScreen(int entityId, CruiseRoute route, boolean readOnly) {
+    public CruiseScreen(int entityId, CruiseRoute route, boolean readOnly, boolean decelerateWhenChunksNotReady) {
         super(Component.translatable("screen.immersive_aircraft_cruise.title"));
         this.entityId = entityId;
         this.route = route.copy();
         this.readOnly = readOnly;
+        this.decelerateWhenChunksNotReady = decelerateWhenChunksNotReady;
         this.runtimeSelectedRoute = route.getSelectedRoute();
         loadSelectedRoute();
     }
@@ -240,6 +239,21 @@ public class CruiseScreen extends Screen {
                 .tooltip(loadingModeTooltip())
                 .build();
         addWritableWidget(loadingModeButton);
+
+        if (entityId >= 0) {
+            int decelerateButtonX = loadingModeButtonX + loadingModeButtonWidth() + CONTROL_GAP;
+            Button decelerateButton = Button.builder(decelerateLabel(), button -> {
+                decelerateWhenChunksNotReady = !decelerateWhenChunksNotReady;
+                button.setMessage(decelerateLabel());
+                button.setTooltip(decelerateTooltip());
+                CruiseNetwork.CHANNEL.sendToServer(
+                        new SetPreloadDecelerationPacket(entityId, decelerateWhenChunksNotReady));
+            }).bounds(decelerateButtonX, landingY, decelerateButtonWidth(), 20)
+                    .tooltip(decelerateTooltip())
+                    .build();
+            decelerateButton.setTooltip(decelerateTooltip());
+            addWritableWidget(decelerateButton);
+        }
 
         int buttonY = height - 28;
         addWritableWidget(Button.builder(Component.translatable("screen.immersive_aircraft_cruise.add_current"), button -> addCurrentPosition())
@@ -506,6 +520,23 @@ public class CruiseScreen extends Screen {
             textWidth = Math.max(textWidth, font.width(Component.translatable(
                     "screen.immersive_aircraft_cruise.landing_mode." + mode.serializedName())));
         }
+        return textWidth + BUTTON_HORIZONTAL_PADDING;
+    }
+
+    private Component decelerateLabel() {
+        return Component.translatable(decelerateWhenChunksNotReady
+                ? "screen.immersive_aircraft_cruise.decelerate.enabled"
+                : "screen.immersive_aircraft_cruise.decelerate.disabled");
+    }
+
+    private Tooltip decelerateTooltip() {
+        return Tooltip.create(Component.translatable("screen.immersive_aircraft_cruise.decelerate.tooltip"));
+    }
+
+    private int decelerateButtonWidth() {
+        int textWidth = Math.max(
+                font.width(Component.translatable("screen.immersive_aircraft_cruise.decelerate.enabled")),
+                font.width(Component.translatable("screen.immersive_aircraft_cruise.decelerate.disabled")));
         return textWidth + BUTTON_HORIZONTAL_PADDING;
     }
 

@@ -246,6 +246,21 @@ public final class CruiseController {
         return player != null && vehicle.getControllingPassenger() == player;
     }
 
+    /**
+     * The switch behind the preload screen's "auto slowdown" button: slow a cruise aircraft down while
+     * the route ahead is still loading. Session state on purpose - the screen is the only place it is
+     * set, so nothing can disagree with a config file.
+     */
+    private static boolean preloadAutoDeceleration = true;
+
+    public static boolean preloadAutoDeceleration() {
+        return preloadAutoDeceleration;
+    }
+
+    public static void setPreloadAutoDeceleration(boolean enabled) {
+        preloadAutoDeceleration = enabled;
+    }
+
     public static boolean shouldKeepPilotTracked(VehicleEntity vehicle, ServerPlayer player) {
         return isPilot(vehicle, player) && hasCruiseModule(vehicle);
     }
@@ -3098,7 +3113,8 @@ public final class CruiseController {
         if (vehicle.level().isClientSide()) {
             return;
         }
-        boolean permitted = !preloadAccelerationGateApplies(route)
+        boolean permitted = !preloadAutoDeceleration
+                || !preloadAccelerationGateApplies(route)
                 || CruiseChunkSendScheduler.isAccelerationReady(vehicle, route);
         PRELOAD_ACCELERATION_PERMITTED.put(vehicle, permitted);
         if (pilot == null) {
@@ -3129,7 +3145,7 @@ public final class CruiseController {
                 vehicle.getId(), pilot.getScoreboardName(), permitted, vehicle.tickCount);
     }
 
-    static void updatePreloadAccelerationPermit(VehicleEntity vehicle) {
+    public static void updatePreloadAccelerationPermit(VehicleEntity vehicle) {
         CruiseVehicleAccess access = (CruiseVehicleAccess) vehicle;
         updatePreloadAccelerationPermit(vehicle, controllingServerPlayer(vehicle), serverRoute(vehicle, access));
     }
@@ -3666,7 +3682,8 @@ public final class CruiseController {
                         player.getScoreboardName(), recipientRole, fuelInfo.amountText(),
                         fuelInfo.remainingTicks(), fuelInfo.speed(), fuelInfo.boosting(), describeFuelIcon(icon));
                 CruiseNetwork.CHANNEL.send(PacketDistributor.PLAYER.with(() -> player),
-                        new UpdateCruiseFuelPacket(vehicle.getId(), fuelInfo));
+                        new UpdateCruiseFuelPacket(vehicle.getId(),
+                                vehicle.getX(), vehicle.getY(), vehicle.getZ(), fuelInfo));
             }
         }
     }

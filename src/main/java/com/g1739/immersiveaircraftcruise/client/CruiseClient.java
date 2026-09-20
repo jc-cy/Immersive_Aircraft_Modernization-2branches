@@ -17,6 +17,8 @@ import immersive_aircraft.client.KeyBindings;
 import immersive_aircraft.entity.VehicleEntity;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.KeyMapping;
+import net.minecraftforge.client.settings.KeyConflictContext;
+import net.minecraftforge.client.settings.KeyModifier;
 import net.minecraft.client.multiplayer.ClientChunkCache;
 import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.world.level.ChunkPos;
@@ -54,6 +56,15 @@ public final class CruiseClient {
             GLFW.GLFW_KEY_PERIOD,
             "key.categories.immersive_aircraft_cruise"
     );
+    /** Repair key, on its own binding (Alt + navigation key by default), so toggling stays a toggle. */
+    public static final KeyMapping REFRESH_RIDE = new KeyMapping(
+            "key.immersive_aircraft_cruise.refresh_ride",
+            KeyConflictContext.UNIVERSAL,
+            KeyModifier.ALT,
+            InputConstants.Type.KEYSYM,
+            GLFW.GLFW_KEY_PERIOD,
+            "key.categories.immersive_aircraft_cruise"
+    );
 
     private CruiseClient() {
     }
@@ -64,6 +75,7 @@ public final class CruiseClient {
         public static void registerKeys(RegisterKeyMappingsEvent event) {
             event.register(OPEN_CRUISE);
             event.register(TOGGLE_CRUISE);
+            event.register(REFRESH_RIDE);
         }
 
         @SubscribeEvent
@@ -106,6 +118,9 @@ public final class CruiseClient {
             while (TOGGLE_CRUISE.consumeClick()) {
                 CruiseNetwork.CHANNEL.sendToServer(togglePacket());
             }
+            while (REFRESH_RIDE.consumeClick()) {
+                ClientPacketHandlers.requestRideResync();
+            }
             boolean brakeDown = KeyBindings.down.isDown();
             boolean dismountDown = KeyBindings.dismount.isDown();
             if ((brakeDown && !brakeWasDown) || (dismountDown && !dismountWasDown)) {
@@ -113,6 +128,7 @@ public final class CruiseClient {
             }
             brakeWasDown = brakeDown;
             dismountWasDown = dismountDown;
+            ClientPacketHandlers.reconcileRouteCacheRadius();
             CruiseHud.clientTick();
             reportMissingAccelerationChunks();
             logClientFlightState();

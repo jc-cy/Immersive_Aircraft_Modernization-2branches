@@ -9,6 +9,8 @@ import com.g1739.immersiveaircraftcruise.cruise.CruiseModuleData;
 import com.g1739.immersiveaircraftcruise.cruise.CruiseRoute;
 import com.g1739.immersiveaircraftcruise.cruise.CruiseVehicleAccess;
 import com.g1739.immersiveaircraftcruise.mixin.ClientChunkCacheInvoker;
+import com.g1739.immersiveaircraftcruise.network.CruiseNetwork;
+import com.g1739.immersiveaircraftcruise.network.RequestCruiseRideResyncPacket;
 import com.g1739.immersiveaircraftcruise.network.SyncVehicleInventoryPacket;
 import com.g1739.immersiveaircraftcruise.cruise.CruiseChunkPayloadCodec;
 import com.g1739.immersiveaircraftcruise.network.CruiseRouteChunkPacket;
@@ -56,6 +58,21 @@ public final class ClientPacketHandlers {
     private static final Map<Integer, PendingAccelerationPermit> PENDING_ACCELERATION_PERMITS = new LinkedHashMap<>();
     private static final Map<Integer, PendingVehicleInventory> PENDING_VEHICLE_INVENTORIES = new LinkedHashMap<>();
     private static int routeApplyTick;
+    /**
+     * The server's 5-tick fuel heartbeat already names the aircraft it considers us onboard. These
+     * counters compare that with our own riding state; the server decides what to do with a mismatch.
+     */
+    private static final int RIDE_MISMATCH_STRIKES = 3;
+    private static final long RIDE_RESYNC_CLIENT_COOLDOWN_TICKS = 20L;
+    /**
+     * A rider's own copy of the aircraft may lag the authoritative position by the interpolation and
+     * round-trip, which at cruise speed is a few tens of blocks. A sustained gap beyond this is the
+     * frozen-copy case - the aircraft sits under the passenger while the server flies on.
+     */
+    private static final double RIDE_COPY_MAX_DRIFT_BLOCKS = 64.0d;
+    private static int heartbeatVehicleId = -1;
+    private static int heartbeatStrikes;
+    private static long lastRideResyncTick = Long.MIN_VALUE;
     private static final ExecutorService DECODE_EXECUTOR = Executors.newSingleThreadExecutor(runnable -> {
         Thread thread = new Thread(runnable, "iacruise-route-packet-decode");
         thread.setDaemon(true);
@@ -161,7 +178,8 @@ public final class ClientPacketHandlers {
         }
     }
 
-    public static void openCruiseScreen(int entityId, CruiseRoute route, boolean readOnly) {
+    public static void openCruiseScreen(int entityId, CruiseRoute route, boolean readOnly,
+                                        boolean decelerateWhenChunksNotReady) {
         Minecraft minecraft = Minecraft.getInstance();
         if (minecraft.level == null) {
             return;
@@ -172,10 +190,10 @@ public final class ClientPacketHandlers {
         if (!route.isEnabled()) {
             invalidateRouteStream();
         }
-        setRouteCacheRadius(route.isEnabled());
         Entity entity = minecraft.level.getEntity(entityId);
         if (entityId < 0 || (entity instanceof VehicleEntity && entity instanceof CruiseVehicleAccess)) {
-            minecraft.setScreen(new CruiseScreen(entityId, route.copy(), readOnly));
+            minecraft.setScreen(new CruiseScreen(entityId, route.copy(), readOnly,
+                    decelerateWhenChunksNotReady));
         }
     }
 
@@ -290,7 +308,25 @@ public final class ClientPacketHandlers {
                 routeEnabled, targetRadius);
     }
 
-    public static void updateCruiseFuel(int entityId, CruiseFuelInfo fuelInfo) {
+    /**
+     * Keeps the widened cache bound to the ride state itself: it is on exactly while this client is on
+     * an aircraft whose route is running. Reconciling the state instead of reacting to events means no
+     * dismount path (key, teleport, dimension change, death, chunk unload) can leave it behind, and no
+     * other aircraft's route state can switch it off.
+     */
+    public static void reconcileRouteCacheRadius() {
+        Minecraft minecraft = Minecraft.getInstance();
+        if (minecraft.level == null || minecraft.player == null) {
+            return;
+        }
+        Entity root = minecraft.player.getRootVehicle();
+        boolean ridingRoute = root instanceof VehicleEntity vehicle
+                && vehicle instanceof CruiseVehicleAccess access
+                && access.iacruise$getRoute().isEnabled();
+        setRouteCacheRadius(ridingRoute);
+    }
+
+    public static void updateCruiseFuel(int entityId, double x, double y, double z, CruiseFuelInfo fuelInfo) {
         Minecraft minecraft = Minecraft.getInstance();
         if (minecraft.level != null) {
             Entity entity = minecraft.level.getEntity(entityId);
@@ -299,6 +335,7 @@ public final class ClientPacketHandlers {
             }
         }
         CruiseHud.setFuelInfo(entityId, fuelInfo);
+        watchRideHeartbeat(entityId, x, y, z);
         Entity entity = minecraft.level == null ? null : minecraft.level.getEntity(entityId);
         String recipientRole = entity instanceof VehicleEntity vehicle
                 && minecraft.player != null
@@ -310,6 +347,75 @@ public final class ClientPacketHandlers {
                 minecraft.level == null ? -1L : minecraft.level.getGameTime(), entityId, recipientRole,
                 fuelInfo.amountText(), fuelInfo.remainingTicks(), fuelInfo.speed(), fuelInfo.boosting(),
                 Thread.currentThread().getName());
+    }
+
+    /**
+     * Compares the heartbeat's aircraft with our own view of it; the server repairs whatever disagrees.
+     *
+     * <p>Two anomalies exist. Either we do not ride the aircraft the server counts us on, or we ride it
+     * but our copy of it is stale - the aircraft stays under the player while the server flies on, and
+     * no amount of ordinary state broadcast helps because our own copy is what is wrong. The heartbeat
+     * carries the authoritative position, so a sustained distance between the two detects exactly that
+     * second case, which is otherwise only recoverable by pressing the refresh key.
+     */
+    private static void watchRideHeartbeat(int entityId, double x, double y, double z) {
+        Minecraft minecraft = Minecraft.getInstance();
+        if (minecraft.level == null || minecraft.player == null) {
+            return;
+        }
+        Entity root = minecraft.player.getRootVehicle();
+        if (root instanceof VehicleEntity vehicle && vehicle.getId() == entityId) {
+            heartbeatVehicleId = entityId;
+            if (vehicle.position().distanceToSqr(x, y, z)
+                    <= RIDE_COPY_MAX_DRIFT_BLOCKS * RIDE_COPY_MAX_DRIFT_BLOCKS) {
+                heartbeatStrikes = 0;
+                return;
+            }
+            if (++heartbeatStrikes >= RIDE_MISMATCH_STRIKES) {
+                heartbeatStrikes = 0;
+                requestRideResync("aircraft copy is behind the server", vehicle);
+            }
+            return;
+        }
+        if (heartbeatVehicleId != entityId) {
+            heartbeatVehicleId = entityId;
+            heartbeatStrikes = 0;
+        }
+        if (++heartbeatStrikes >= RIDE_MISMATCH_STRIKES) {
+            heartbeatStrikes = 0;
+            requestRideResync("heartbeat names another aircraft", root);
+        }
+    }
+
+    /**
+     * Manual repair on its own key binding: the server repeats its own state for the aircraft this
+     * client is riding, which rebuilds this client's copy of it.
+     */
+    public static void requestRideResync() {
+        Minecraft minecraft = Minecraft.getInstance();
+        if (minecraft.player == null) {
+            return;
+        }
+        Entity root = minecraft.player.getRootVehicle();
+        if (!(root instanceof VehicleEntity vehicle) || !CruiseModuleData.hasModule(vehicle)) {
+            return;
+        }
+        requestRideResync("manual", root);
+    }
+
+    private static void requestRideResync(String reason, Entity root) {
+        Minecraft minecraft = Minecraft.getInstance();
+        long gameTime = minecraft.level == null ? 0L : minecraft.level.getGameTime();
+        if (lastRideResyncTick != Long.MIN_VALUE
+                && gameTime - lastRideResyncTick < RIDE_RESYNC_CLIENT_COOLDOWN_TICKS) {
+            return;
+        }
+        lastRideResyncTick = gameTime;
+        int rootId = root instanceof VehicleEntity vehicle ? vehicle.getId() : 0;
+        ImmersiveAircraftCruise.LOGGER.warn(
+                "[CruiseRide][Client] riding-state validation ({}), root={}",
+                reason, root == null ? "none" : root.getId());
+        CruiseNetwork.CHANNEL.sendToServer(new RequestCruiseRideResyncPacket(rootId));
     }
 
     public static void updateCruiseAccelerationPermit(int entityId, boolean permitted) {

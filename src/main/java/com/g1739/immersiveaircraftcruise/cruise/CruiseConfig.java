@@ -49,6 +49,7 @@ public final class CruiseConfig {
                 .comment("Optional horizontal speed limit for Rotorcraft (airships, airboats, etc.) during cruise navigation, in blocks per second. 0 disables the limit.")
                 .defineInRange("speed_limit", 0.0d, 0.0d, 10000.0d);
         builder.pop();
+
         SPEC = builder.build();
     }
 
