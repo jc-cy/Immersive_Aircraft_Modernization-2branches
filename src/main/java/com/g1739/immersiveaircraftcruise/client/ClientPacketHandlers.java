@@ -65,13 +65,21 @@ public final class ClientPacketHandlers {
     private static final int RIDE_MISMATCH_STRIKES = 3;
     private static final long RIDE_RESYNC_CLIENT_COOLDOWN_TICKS = 20L;
     /**
-     * A rider's own copy of the aircraft may lag the authoritative position by the interpolation and
-     * round-trip, which at cruise speed is a few tens of blocks. A sustained gap beyond this is the
-     * frozen-copy case - the aircraft sits under the passenger while the server flies on.
+     * Latency alone leaves a rider's copy behind by (cruise speed x round trip), which is already tens
+     * of blocks on a 0.6s link, so one heartbeat cannot tell lag from a frozen copy. Only a gap that a
+     * cruise aircraft cannot produce by lagging (150 blocks is about 1.3s of flight) counts, and it has
+     * to hold for a full three seconds before the server is asked to correct anything.
      */
-    private static final double RIDE_COPY_MAX_DRIFT_BLOCKS = 64.0d;
+    private static final double RIDE_COPY_MAX_DRIFT_BLOCKS = 150.0d;
+    private static final long RIDE_DRIFT_WINDOW_TICKS = 60L;
+    /** Below this the authoritative copy did not advance either: the server is the one that is behind. */
+    private static final double RIDE_SERVER_MOVED_MIN_BLOCKS = 1.0d;
     private static int heartbeatVehicleId = -1;
     private static int heartbeatStrikes;
+    private static long driftWindowStartTick = Long.MIN_VALUE;
+    private static double driftWindowServerX;
+    private static double driftWindowServerY;
+    private static double driftWindowServerZ;
     private static long lastRideResyncTick = Long.MIN_VALUE;
     private static final ExecutorService DECODE_EXECUTOR = Executors.newSingleThreadExecutor(runnable -> {
         Thread thread = new Thread(runnable, "iacruise-route-packet-decode");
@@ -357,6 +365,12 @@ public final class ClientPacketHandlers {
      * no amount of ordinary state broadcast helps because our own copy is what is wrong. The heartbeat
      * carries the authoritative position, so a sustained distance between the two detects exactly that
      * second case, which is otherwise only recoverable by pressing the refresh key.
+     *
+     * <p>Lagging is not that case: latency produces a roughly constant offset, so the gap has to stay
+     * beyond {@link #RIDE_COPY_MAX_DRIFT_BLOCKS} for a whole {@link #RIDE_DRIFT_WINDOW_TICKS} window.
+     * If the authoritative position did not advance during that window either, the server itself is the
+     * one that fell behind (a stall while preloading) and correcting this client would drag it back to
+     * a stale position, so that case is only reported.
      */
     private static void watchRideHeartbeat(int entityId, double x, double y, double z) {
         Minecraft minecraft = Minecraft.getInstance();
@@ -369,14 +383,37 @@ public final class ClientPacketHandlers {
             if (vehicle.position().distanceToSqr(x, y, z)
                     <= RIDE_COPY_MAX_DRIFT_BLOCKS * RIDE_COPY_MAX_DRIFT_BLOCKS) {
                 heartbeatStrikes = 0;
+                clearDriftWindow();
                 return;
             }
-            if (++heartbeatStrikes >= RIDE_MISMATCH_STRIKES) {
-                heartbeatStrikes = 0;
-                requestRideResync("aircraft copy is behind the server", vehicle);
+            long gameTime = minecraft.level.getGameTime();
+            if (driftWindowStartTick == Long.MIN_VALUE) {
+                driftWindowStartTick = gameTime;
+                driftWindowServerX = x;
+                driftWindowServerY = y;
+                driftWindowServerZ = z;
+                return;
             }
+            if (gameTime - driftWindowStartTick < RIDE_DRIFT_WINDOW_TICKS) {
+                return;
+            }
+            double serverMoved = Math.abs(x - driftWindowServerX)
+                    + Math.abs(y - driftWindowServerY)
+                    + Math.abs(z - driftWindowServerZ);
+            double drift = Math.sqrt(vehicle.position().distanceToSqr(x, y, z));
+            clearDriftWindow();
+            if (serverMoved < RIDE_SERVER_MOVED_MIN_BLOCKS) {
+                ImmersiveAircraftCruise.LOGGER.warn(
+                        "[CruiseRide][Client] aircraft copy drifted {} blocks for {} ticks, but the "
+                                + "authoritative copy did not advance either; not repairing",
+                        String.format("%.1f", drift), RIDE_DRIFT_WINDOW_TICKS);
+                return;
+            }
+            requestRideResync("aircraft copy drifted " + String.format("%.1f", drift)
+                    + " blocks for " + (RIDE_DRIFT_WINDOW_TICKS / 20L) + "s", vehicle);
             return;
         }
+        clearDriftWindow();
         if (heartbeatVehicleId != entityId) {
             heartbeatVehicleId = entityId;
             heartbeatStrikes = 0;
@@ -385,6 +422,10 @@ public final class ClientPacketHandlers {
             heartbeatStrikes = 0;
             requestRideResync("heartbeat names another aircraft", root);
         }
+    }
+
+    private static void clearDriftWindow() {
+        driftWindowStartTick = Long.MIN_VALUE;
     }
 
     /**

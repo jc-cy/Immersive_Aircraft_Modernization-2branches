@@ -8,13 +8,11 @@ import org.spongepowered.asm.mixin.gen.Invoker;
 
 /**
  * The pairing primitives of {@code ChunkMap.TrackedEntity}, exposed so the repair path can drop one
- * client's copy of an aircraft and hand it a fresh one at the server position.
+ * client into the tracked set it may have missed, and so the broadcast gap check can inspect the
+ * {@code ServerEntity} that actually carries the packets.
  */
 @Mixin(targets = "net.minecraft.server.level.ChunkMap$TrackedEntity")
 public interface TrackedEntityResync {
-    @Invoker("removePlayer")
-    void iacruise$removePlayer(ServerPlayer player);
-
     @Invoker("updatePlayer")
     void iacruise$updatePlayer(ServerPlayer player);
 

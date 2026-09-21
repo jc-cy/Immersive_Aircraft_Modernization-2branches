@@ -46,6 +46,26 @@ public abstract class EntityRidingStateMixin {
         CruiseChunkSendScheduler.onRidingStateChanged(vehicle, player, false);
     }
 
+    /**
+     * The passenger list is pushed after the change, not before it.
+     *
+     * <p>At the HEAD of {@code removePassenger} the departing rider is still in the vehicle's list, so a
+     * packet built there would still name them as the first passenger - which is the pilot on every
+     * client. Pushing it after the removal makes the remaining rider the pilot on both sides, which is
+     * the hand-over a logged-out or dismounting pilot has to leave behind.
+     */
+    @Inject(method = "removePassenger", at = @At("RETURN"))
+    private void iacruise$pushPassengerListAfterRemoval(Entity passenger, CallbackInfo ci) {
+        if (!((Object) this instanceof VehicleEntity vehicle)
+                || vehicle.level().isClientSide()
+                || !(passenger instanceof ServerPlayer player)
+                || !CruiseController.hasCruiseModule(vehicle)
+                || vehicle.getRemovalReason() != null) {
+            return;
+        }
+        CruiseChunkSendScheduler.onPassengerListChanged(vehicle, player);
+    }
+
     @Inject(method = "startRiding(Lnet/minecraft/world/entity/Entity;Z)Z", at = @At("RETURN"))
     private void iacruise$onPassengerAdded(Entity vehicle, boolean force, CallbackInfoReturnable<Boolean> cir) {
         if (cir.getReturnValueZ()
@@ -65,6 +85,10 @@ public abstract class EntityRidingStateMixin {
                 && reason == Entity.RemovalReason.UNLOADED_TO_CHUNK
                 && CruiseController.hasCruiseModule(vehicle)) {
             CruiseChunkSendScheduler.rememberRide(vehicle);
+            // The aircraft is going away with the riders still listed on it; their clients are told so
+            // explicitly, because a client that missed the tracking removal would keep riding a copy of
+            // an aircraft the server can no longer correct.
+            CruiseChunkSendScheduler.releaseRidersOnRemoval(vehicle);
         }
     }
 }
