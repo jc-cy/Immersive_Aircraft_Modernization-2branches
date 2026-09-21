@@ -22,7 +22,7 @@ description = '''
 - 预加载模式下均有加载保护，前方必要区块未加载时自动降低速度；性能不足或高速飞行建议开启 L 形飞行预加载。
 - 降落策略飞机可选正常降落和盘旋，飞艇额外有垂直降落。
 - 巡航模式有超加速、加速、普通、节能四档模式。
-- 各种功能已适配多人乘坐飞机。
+- 各种功能已适配多人乘坐飞机，且多人乘坐飞机时，驾驶员下线会转让驾驶权。
 
 【HUD 信息】
 - 显示速度、燃料数量、燃料剩余时间和飞行剩余时间。
@@ -45,7 +45,7 @@ Core Features
 - All preloading modes include load protection: when the required chunks ahead are not loaded, the aircraft automatically reduces speed. L-shaped preloading is recommended when performance is limited or when flying at high speed.
 - Aircraft can choose normal landing or holding pattern; airships additionally support vertical landing.
 - Cruise modes include Super Acceleration, Acceleration, Normal, and Eco.
-- All features have been adapted for multiplayer aircraft with multiple passengers.
+- All features are adapted for aircraft carrying multiple passengers, and when the pilot logs out of a multiplayer aircraft, pilot control is handed over to the remaining passenger.
 
 【HUD Information】
 - Displays speed, fuel amount, fuel time remaining, and flight time remaining.
