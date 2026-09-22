@@ -24,6 +24,11 @@ description = '''
 - 巡航模式有超加速、加速、普通、节能四档模式。
 - 各种功能已适配多人乘坐飞机，且多人乘坐飞机时，驾驶员下线会转让驾驶权。
 
+【按键绑定】
+- 模块本身会显示当前绑定的导航按钮，包含状态刷新、航线图开关和导航开关。均可自行调整。
+- 其中状态刷新按钮可以强制刷新当前飞机实体，可能在异常情况下飞机卡死时有用。
+- 默认绑定键位分别为：打开导航页<,>、启动导航<.>、刷新飞机状态<ALT+导航键>。
+
 【HUD 信息】
 - 显示速度、燃料数量、燃料剩余时间和飞行剩余时间。
 - 飞行剩余时间按水平距离/速度估算，并显示当前航线及上下站信息。
@@ -46,6 +51,11 @@ Core Features
 - Aircraft can choose normal landing or holding pattern; airships additionally support vertical landing.
 - Cruise modes include Super Acceleration, Acceleration, Normal, and Eco.
 - All features are adapted for aircraft carrying multiple passengers, and when the pilot logs out of a multiplayer aircraft, pilot control is handed over to the remaining passenger.
+
+【Key Bindings】
+- The module itself shows the currently bound navigation keys, including state refresh, route screen toggle, and navigation toggle. All of them can be adjusted as you like.
+- The state refresh key can force-refresh the current aircraft entity, which may help when the aircraft is stuck in abnormal situations.
+- The default key bindings are: open navigation page <,>, start navigation <.>, refresh aircraft state <ALT + navigation key>.
 
 【HUD Information】
 - Displays speed, fuel amount, fuel time remaining, and flight time remaining.
