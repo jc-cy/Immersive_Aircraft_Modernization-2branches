@@ -9,6 +9,7 @@ import com.g1739.immersiveaircraftcruise.cruise.CruiseModuleData;
 import com.g1739.immersiveaircraftcruise.cruise.CruiseRoute;
 import com.g1739.immersiveaircraftcruise.cruise.CruiseVehicleAccess;
 import com.g1739.immersiveaircraftcruise.mixin.ClientChunkCacheInvoker;
+import com.g1739.immersiveaircraftcruise.mixin.ClientLevelAccessor;
 import com.g1739.immersiveaircraftcruise.network.CruiseNetwork;
 import com.g1739.immersiveaircraftcruise.network.RequestCruiseRideResyncPacket;
 import com.g1739.immersiveaircraftcruise.network.SyncVehicleInventoryPacket;
@@ -26,6 +27,7 @@ import net.minecraft.world.level.chunk.ChunkStatus;
 import net.minecraft.world.level.chunk.EmptyLevelChunk;
 import net.minecraft.world.level.chunk.LevelChunk;
 import net.minecraft.world.entity.Entity;
+import net.minecraft.world.entity.player.Player;
 
 import java.util.List;
 import java.util.LinkedHashMap;
@@ -74,13 +76,29 @@ public final class ClientPacketHandlers {
     private static final long RIDE_DRIFT_WINDOW_TICKS = 60L;
     /** Below this the authoritative copy did not advance either: the server is the one that is behind. */
     private static final double RIDE_SERVER_MOVED_MIN_BLOCKS = 1.0d;
+    /**
+     * How long a rider's copy may stay broken before the automatic path stops aligning data and
+     * rebuilds the copy instead. Alignment is silent and stays cheap, but it only works when something
+     * on this client still applies the aircraft's position - the reset key's rebuild is the one repair
+     * that works without it, and ten seconds of an unusable view is long enough to justify the jump.
+     */
+    private static final long RIDE_DRIFT_ESCALATION_TICKS = 200L;
     private static int heartbeatVehicleId = -1;
     private static int heartbeatStrikes;
     private static long driftWindowStartTick = Long.MIN_VALUE;
+    private static long driftAnomalyStartTick = Long.MIN_VALUE;
     private static double driftWindowServerX;
     private static double driftWindowServerY;
     private static double driftWindowServerZ;
     private static long lastRideResyncTick = Long.MIN_VALUE;
+    /** The last authoritative position this client was told about for the aircraft it rides. */
+    private static int authoritativeVehicleId = -1;
+    private static double authoritativeX;
+    private static double authoritativeY;
+    private static double authoritativeZ;
+    private static long authoritativeTick = Long.MIN_VALUE;
+    /** A heartbeat this fresh still describes where the aircraft is; older ones are not used by hand. */
+    private static final long AUTHORITATIVE_POSITION_TTL_TICKS = 40L;
     private static final ExecutorService DECODE_EXECUTOR = Executors.newSingleThreadExecutor(runnable -> {
         Thread thread = new Thread(runnable, "iacruise-route-packet-decode");
         thread.setDaemon(true);
@@ -380,10 +398,16 @@ public final class ClientPacketHandlers {
         Entity root = minecraft.player.getRootVehicle();
         if (root instanceof VehicleEntity vehicle && vehicle.getId() == entityId) {
             heartbeatVehicleId = entityId;
+            authoritativeVehicleId = entityId;
+            authoritativeX = x;
+            authoritativeY = y;
+            authoritativeZ = z;
+            authoritativeTick = minecraft.level.getGameTime();
             if (vehicle.position().distanceToSqr(x, y, z)
                     <= RIDE_COPY_MAX_DRIFT_BLOCKS * RIDE_COPY_MAX_DRIFT_BLOCKS) {
                 heartbeatStrikes = 0;
                 clearDriftWindow();
+                driftAnomalyStartTick = Long.MIN_VALUE;
                 return;
             }
             long gameTime = minecraft.level.getGameTime();
@@ -402,11 +426,30 @@ public final class ClientPacketHandlers {
                     + Math.abs(z - driftWindowServerZ);
             double drift = Math.sqrt(vehicle.position().distanceToSqr(x, y, z));
             clearDriftWindow();
+            // Our copy of the aircraft is what is wrong, and it is also the half this client can fix
+            // without waiting for a round trip: see reanchorAircraftCopy. The server is still asked to
+            // repeat its state below, because that is what re-aligns the passenger's server-side seat
+            // and re-sends the route, but the copy no longer depends on that answer arriving.
+            boolean reanchored = reanchorAircraftCopy(vehicle, x, y, z, drift);
             if (serverMoved < RIDE_SERVER_MOVED_MIN_BLOCKS) {
                 ImmersiveAircraftCruise.LOGGER.warn(
                         "[CruiseRide][Client] aircraft copy drifted {} blocks for {} ticks, but the "
-                                + "authoritative copy did not advance either; not repairing",
-                        String.format("%.1f", drift), RIDE_DRIFT_WINDOW_TICKS);
+                                + "authoritative copy did not advance either; not repairing{}",
+                        String.format("%.1f", drift), RIDE_DRIFT_WINDOW_TICKS,
+                        reanchored ? ", re-anchored the local copy" : "");
+                return;
+            }
+            if (driftAnomalyStartTick == Long.MIN_VALUE) {
+                driftAnomalyStartTick = gameTime;
+            }
+            if (gameTime - driftAnomalyStartTick >= RIDE_DRIFT_ESCALATION_TICKS) {
+                // Data alignment had ten seconds and did not take: only re-creating the copy can still
+                // place it, so the automatic path escalates to the same rebuild the reset key requests.
+                // The timer restarts, so this stays a repair and not a loop.
+                driftAnomalyStartTick = gameTime;
+                sendRideResync("aircraft copy stayed " + String.format("%.1f", drift)
+                        + " blocks away for " + (RIDE_DRIFT_ESCALATION_TICKS / 20L)
+                        + "s with no recovery; rebuilding this client's copy", vehicle, true);
                 return;
             }
             requestRideResync("aircraft copy drifted " + String.format("%.1f", drift)
@@ -414,6 +457,7 @@ public final class ClientPacketHandlers {
             return;
         }
         clearDriftWindow();
+        driftAnomalyStartTick = Long.MIN_VALUE;
         if (heartbeatVehicleId != entityId) {
             heartbeatVehicleId = entityId;
             heartbeatStrikes = 0;
@@ -429,8 +473,17 @@ public final class ClientPacketHandlers {
     }
 
     /**
-     * Manual repair on its own key binding: the server repeats its own state for the aircraft this
-     * client is riding, which rebuilds this client's copy of it.
+     * Manual repair on its own key binding, and the only entrance that asks for the strong version.
+     *
+     * <p>The key is meant to work whenever it is pressed, so it no longer filters on what this client
+     * believes it rides: it reports the aircraft it thinks it is on (0 when it thinks it is on none) and
+     * lets the server decide. The server's hard reset re-creates this client's copy of the aircraft from
+     * its own state, which is the one repair that survives a split the cheap alignment cannot touch -
+     * a client that rides an aircraft the server has no ride for, or a copy that stopped ticking and
+     * therefore never applies another position.
+     *
+     * <p>The copy is also re-anchored locally first, from the position the last heartbeat carried. That
+     * is free, needs no round trip and already fixes the frozen-copy case on its own.
      */
     public static void requestRideResync() {
         Minecraft minecraft = Minecraft.getInstance();
@@ -438,13 +491,76 @@ public final class ClientPacketHandlers {
             return;
         }
         Entity root = minecraft.player.getRootVehicle();
-        if (!(root instanceof VehicleEntity vehicle) || !CruiseModuleData.hasModule(vehicle)) {
-            return;
+        if (root instanceof VehicleEntity vehicle
+                && authoritativeVehicleId == vehicle.getId()
+                && minecraft.level != null
+                && minecraft.level.getGameTime() - authoritativeTick <= AUTHORITATIVE_POSITION_TTL_TICKS) {
+            reanchorAircraftCopy(vehicle, authoritativeX, authoritativeY, authoritativeZ,
+                    Math.sqrt(vehicle.position().distanceToSqr(authoritativeX, authoritativeY,
+                            authoritativeZ)));
         }
-        requestRideResync("manual", root);
+        sendRideResync("manual hard reset", root, true);
+    }
+
+    /**
+     * Puts this client's copy of the aircraft onto the authoritative position the heartbeat carries.
+     *
+     * <p>Immersive Aircraft does not apply an incoming position where it arrives: {@code lerpTo} only
+     * stores the target, and the copy is moved inside {@code VehicleEntity#tick()}. A client that lost
+     * the aircraft's tick - its chunk section left the client's ticked set while the copy was still
+     * behind, which is what a two-second client stall next to a preloading server produces - therefore
+     * keeps a frozen copy forever: every correction the server sends, including the vanilla teleport
+     * packet used by the ride repair, is stored and never applied. The passenger is ticked only through
+     * the aircraft it rides, so the rider freezes with it. Moving the copy here fixes the position and,
+     * because {@code Entity#setPos} reports the move to the level, its ticking state with it.
+     *
+     * <p>A copy this client is actually flying is left alone: while the local player is the control
+     * seat and the copy is ticking, that copy is the authority the server takes its position from, and
+     * pulling it to the server's number would drag the aircraft. The condition is therefore not
+     * "am I the pilot" but "am I flying": a control-seat copy that this client no longer ticks is
+     * flying nothing - no local simulation runs, no move packet goes out - so aligning it cannot drag
+     * the aircraft, and it is exactly the copy that needs the authoritative position to start ticking
+     * again. That is the state a rider lands in when the seat is handed over while its copy is frozen.
+     */
+    private static boolean reanchorAircraftCopy(VehicleEntity vehicle, double x, double y, double z,
+                                                double drift) {
+        Minecraft minecraft = Minecraft.getInstance();
+        Player self = minecraft.player;
+        if (self == null) {
+            return false;
+        }
+        boolean ticking = isTickedByThisClient(vehicle);
+        boolean controlling = vehicle.isControlledByLocalInstance()
+                || vehicle.getControllingPassenger() == self;
+        if (controlling && ticking) {
+            return false;
+        }
+        vehicle.setPos(x, y, z);
+        vehicle.setOldPosAndRot();
+        // Immersive Aircraft interpolates towards the last target it was handed; aim that target at the
+        // position just applied so the next tick has nothing left to move the copy back towards.
+        vehicle.lerpTo(x, y, z, vehicle.getYRot(), vehicle.getXRot(), 0, true);
+        vehicle.positionRider(self);
+        self.setOldPosAndRot();
+        ImmersiveAircraftCruise.LOGGER.warn(
+                "[CruiseRide][Client] re-anchored the aircraft copy: vehicleId={}, driftWas={}, "
+                        + "controlling={}, wasTicking={}, tickedNow={}",
+                vehicle.getId(), String.format("%.1f", drift), controlling, ticking,
+                isTickedByThisClient(vehicle));
+        return true;
+    }
+
+    /** Whether this client currently ticks the entity, i.e. its chunk section is in the ticked set. */
+    private static boolean isTickedByThisClient(Entity entity) {
+        return entity.level() instanceof ClientLevel level
+                && ((ClientLevelAccessor) level).iacruise$getTickingEntities().contains(entity);
     }
 
     private static void requestRideResync(String reason, Entity root) {
+        sendRideResync(reason, root, false);
+    }
+
+    private static void sendRideResync(String reason, Entity root, boolean hardReset) {
         Minecraft minecraft = Minecraft.getInstance();
         long gameTime = minecraft.level == null ? 0L : minecraft.level.getGameTime();
         if (lastRideResyncTick != Long.MIN_VALUE
@@ -452,11 +568,13 @@ public final class ClientPacketHandlers {
             return;
         }
         lastRideResyncTick = gameTime;
-        int rootId = root instanceof VehicleEntity vehicle ? vehicle.getId() : 0;
+        int rootId = root == null ? 0 : root.getId();
+        boolean clientControls = root instanceof VehicleEntity vehicle
+                && (vehicle.isControlledByLocalInstance() || vehicle.getControllingPassenger() == minecraft.player);
         ImmersiveAircraftCruise.LOGGER.warn(
-                "[CruiseRide][Client] riding-state validation ({}), root={}",
-                reason, root == null ? "none" : root.getId());
-        CruiseNetwork.CHANNEL.sendToServer(new RequestCruiseRideResyncPacket(rootId));
+                "[CruiseRide][Client] riding-state validation ({}), root={}, localController={}",
+                reason, root == null ? "none" : root.getId(), clientControls);
+        CruiseNetwork.CHANNEL.sendToServer(new RequestCruiseRideResyncPacket(rootId, hardReset, clientControls));
     }
 
     public static void updateCruiseAccelerationPermit(int entityId, boolean permitted) {

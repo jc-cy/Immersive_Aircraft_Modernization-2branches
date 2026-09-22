@@ -127,9 +127,21 @@ public final class CruiseChunkSendScheduler {
     private static final long RIDE_MEMORY_TTL_TICKS = 20L * 60L * 5L;
     private static final long RIDE_RESYNC_COOLDOWN_TICKS = 20L;
     private static final Map<ServerPlayer, Long> RIDE_RESYNC_COOLDOWNS = new IdentityHashMap<>();
+    /**
+     * The reset key has its own clock. The automatic drift check repairs every couple of seconds, and a
+     * press that shared that clock would be swallowed by it - the "the key does nothing" report.
+     */
+    private static final long HARD_RESET_COOLDOWN_TICKS = 40L;
+    private static final Map<ServerPlayer, Long> HARD_RESET_COOLDOWNS = new IdentityHashMap<>();
     private static final Map<ServerLevel, Set<Long>> CACHE_INVALIDATIONS = new ConcurrentHashMap<>();
     /** Last chunk each cruising aircraft held, for the standstill check. */
     private static final Map<VehicleEntity, StandstillMark> STANDSTILL_MARKS = new IdentityHashMap<>();
+    /**
+     * How many standstill verdicts in a row an aircraft has earned. One verdict is already three
+     * seconds without movement, but a server that stalls under load can produce one for a healthy
+     * aircraft, so the control seat is only rebuilt once a second verdict confirms it.
+     */
+    private static final Map<VehicleEntity, Integer> STANDSTILL_REPORTS = new IdentityHashMap<>();
     /**
      * Aircraft that have already flown in this navigation run. Standing still before ever moving is a
      * take-off waiting for its pilot, not a freeze, so the standstill check only arms after the aircraft
@@ -328,6 +340,137 @@ public final class CruiseChunkSendScheduler {
         ImmersiveAircraftCruise.LOGGER.warn(
                 "[CruiseRide] put a player back on the aircraft the client still rode: player={}, vehicleId={}",
                 player.getScoreboardName(), remembered.getId());
+    }
+
+    /**
+     * The reset key's strong repair: it always acts, and on the riding side it rebuilds this client's
+     * copy of the aircraft instead of only aligning data with it.
+     *
+     * <p>The automatic drift check stays data-only on purpose - it runs by itself every couple of
+     * seconds and entity churn there would be stutter the player never asked for. A key press is the
+     * opposite: the player is already stuck and wants the one repair that can still work, so the copy
+     * is thrown away and re-created by the vanilla pairing path. A spawn packet is the only thing that
+     * ever places an entity in a client that no longer ticks it, which is exactly the state a frozen
+     * copy is in.
+     *
+     * <p>It never refuses on a technicality: no ride on the server but one in session memory means the
+     * player is put back on it first; a client that rides an aircraft this server has no ride for is
+     * sent that aircraft's authoritative passenger list, which does not name it, so the client lets its
+     * own copy go.
+     *
+     * <p>Whoever asks for this version gets the rebuild, the control seat included: it is the rescue
+     * path, and a player who presses it (or a client that has watched its copy stay broken for ten
+     * seconds, or an aircraft the server has proven is not moving) is already past the point where
+     * "nothing changed" is acceptable. The cost is the one a rebuild always has for the control seat -
+     * that client's copy is re-created, so it is dismounted and re-seated once and its local flight
+     * state restarts from the server's - which is why the automatic drift check still prefers the cheap
+     * alignment and only escalates after ten seconds.
+     *
+     * <p>{@code clientControls} is not a filter: it is logged against the server's own view, because
+     * "the pilot left and the seat moved to another player while some client kept flying the old
+     * arrangement" is exactly the split that used to be mistaken for a healthy control seat.
+     */
+    public static void hardResetRideState(ServerPlayer player, int reportedVehicleId,
+                                          boolean clientControls) {
+        if (player == null || player.hasDisconnected()) {
+            return;
+        }
+        long serverTick = player.server.getTickCount();
+        Long previous = HARD_RESET_COOLDOWNS.get(player);
+        if (previous != null && serverTick - previous < HARD_RESET_COOLDOWN_TICKS) {
+            return;
+        }
+        HARD_RESET_COOLDOWNS.put(player, serverTick);
+
+        VehicleEntity vehicle = null;
+        boolean restored = false;
+        if (player.getRootVehicle() instanceof VehicleEntity onboard
+                && CruiseController.hasCruiseModule(onboard)) {
+            vehicle = onboard;
+        } else {
+            VehicleEntity remembered = rememberedVehicle(player);
+            if (remembered != null && !player.isDeadOrDying() && player.startRiding(remembered, true)) {
+                remembered.positionRider(player);
+                vehicle = remembered;
+                restored = true;
+            }
+        }
+
+        if (vehicle == null) {
+            convergeGhostRide(player, reportedVehicleId);
+            return;
+        }
+
+        // Align the server-side seat first: the re-pair below is a vanilla tracking call, and vanilla
+        // only pairs a player that is within its tracking range of the entity.
+        CruiseController.synchronizeCruiseMovement(vehicle, "hard-reset");
+        boolean serverControls = vehicle.getControllingPassenger() == player;
+        boolean rebuilt = forceRebuildPairing(player, vehicle);
+        if (!rebuilt) {
+            // Also corrects the control seat when this client had the list wrong, and covers the case
+            // where the pairing could not be re-created because the player is out of tracking range.
+            player.connection.send(new ClientboundSetPassengersPacket(vehicle));
+        }
+        sendAuthoritativeRoute(player, vehicle);
+        ImmersiveAircraftCruise.LOGGER.warn(
+                "[CruiseRide] hard reset: player={}, vehicleId={}, rebuilt={}, restoredRide={}, "
+                        + "serverControlSeat={}, controlSeatSplit={}, riders={}",
+                player.getScoreboardName(), vehicle.getId(), rebuilt, restored,
+                serverControls, serverControls != clientControls, vehicle.getPassengers().size());
+    }
+
+    /**
+     * The client rides an aircraft this server keeps no ride for, and session memory has nothing either
+     * (another dimension, a destroyed aircraft, or a copy that outlived its pairing). Nothing can be
+     * rebuilt, but the client is still brought back to the server's own truth: the aircraft's
+     * authoritative passenger list does not name the player, so their client releases the copy, and
+     * their position is re-sent from the server's side.
+     */
+    private static void convergeGhostRide(ServerPlayer player, int reportedVehicleId) {
+        Entity claimed = player.serverLevel().getEntity(reportedVehicleId);
+        if (claimed instanceof VehicleEntity vehicle && CruiseController.hasCruiseModule(vehicle)) {
+            pairAircraftWith(player, vehicle);
+            player.connection.send(new ClientboundSetPassengersPacket(vehicle));
+            ImmersiveAircraftCruise.LOGGER.warn(
+                    "[CruiseRide] hard reset released a client-side ride the server does not keep: "
+                            + "player={}, vehicleId={}",
+                    player.getScoreboardName(), vehicle.getId());
+        } else {
+            ImmersiveAircraftCruise.LOGGER.warn(
+                    "[CruiseRide] hard reset found no aircraft to repair: player={}, reportedVehicleId={}",
+                    player.getScoreboardName(), reportedVehicleId);
+        }
+        player.connection.teleport(player.getX(), player.getY(), player.getZ(),
+                player.getYRot(), player.getXRot());
+    }
+
+    /**
+     * Drops this client's copy of the aircraft and re-creates it from the authoritative entity: the
+     * removal makes the client let go of the entity it rides, the re-pair sends the spawn packet (with
+     * the entity data and the server's seat order) that builds a fresh copy at the authoritative
+     * position.
+     *
+     * <p>Vanilla's re-pair keeps its own range check, so the result is verified; if it declined (the
+     * player happens to be outside the tracking range of the aircraft), the pairing is restored by
+     * hand. That check exists to stop wasting bandwidth on entities a player cannot see, which is not
+     * a reason to leave a player who asked for a reset without their aircraft.
+     */
+    private static boolean forceRebuildPairing(ServerPlayer player, VehicleEntity vehicle) {
+        ServerLevel level = (ServerLevel) vehicle.level();
+        Object tracked = ((ChunkMapInvoker) level.getChunkSource().chunkMap)
+                .iacruise$getEntityMap().get(vehicle.getId());
+        if (!(tracked instanceof TrackedEntityResync resync)) {
+            return false;
+        }
+        resync.iacruise$removePlayer(player);
+        resync.iacruise$updatePlayer(player);
+        if (!resync.iacruise$getSeenBy().contains(player.connection)) {
+            resync.iacruise$getSeenBy().add(player.connection);
+            if (resync.iacruise$getServerEntity() instanceof ServerEntityBroadcast broadcast) {
+                broadcast.iacruise$addPairing(player);
+            }
+        }
+        return true;
     }
 
     /**
@@ -837,6 +980,8 @@ public final class CruiseChunkSendScheduler {
                 vehicle.isRemoved() || !activeVehicles.contains(vehicle));
         STANDSTILL_MARKS.keySet().removeIf(vehicle ->
                 vehicle.isRemoved() || !activeVehicles.contains(vehicle));
+        STANDSTILL_REPORTS.keySet().removeIf(vehicle ->
+                vehicle.isRemoved() || !activeVehicles.contains(vehicle));
         HAS_FLOWN.removeIf(vehicle ->
                 vehicle.isRemoved() || !activeVehicles.contains(vehicle));
     }
@@ -858,6 +1003,7 @@ public final class CruiseChunkSendScheduler {
             if (previous != null) {
                 HAS_FLOWN.add(vehicle);
             }
+            STANDSTILL_REPORTS.remove(vehicle);
             STANDSTILL_MARKS.put(vehicle, StandstillMark.of(vehicle, serverTick));
             return;
         }
@@ -875,9 +1021,20 @@ public final class CruiseChunkSendScheduler {
                 CRUISE_STANDSTILL_TICKS, vehicle.getId(), vehicle.chunkPosition(),
                 vehicle.getPassengers().size());
         reportHookOwners("cruise standstill");
+        int reports = STANDSTILL_REPORTS.merge(vehicle, 1, Integer::sum);
         for (Entity passenger : List.copyOf(vehicle.getPassengers())) {
             if (passenger instanceof ServerPlayer rider) {
-                repairRideState(rider, vehicle.getId());
+                // A standstill while cruising is proof that the aircraft is not moving, which is the one
+                // piece of evidence a frozen client cannot produce for itself: a copy that never ticks
+                // does not drift either, so neither rider's heartbeat check ever fires. Rebuilding is
+                // therefore forced here, and the control seat only waits for a second verdict because a
+                // single one can also come from a server that stalled under load.
+                boolean controlSeat = vehicle.getControllingPassenger() == rider;
+                if (!controlSeat || reports >= 2) {
+                    hardResetRideState(rider, vehicle.getId(), controlSeat);
+                } else {
+                    repairRideState(rider, vehicle.getId());
+                }
             }
         }
     }
@@ -1094,6 +1251,7 @@ public final class CruiseChunkSendScheduler {
             stopPilotNavigation(player, "logout");
             PENDING_TELEPORTS.remove(player);
             RIDE_RESYNC_COOLDOWNS.remove(player);
+            HARD_RESET_COOLDOWNS.remove(player);
             NETWORK_STATES.remove(player);
             CONTEXT_STATUSES.remove(player);
         }
@@ -1115,6 +1273,7 @@ public final class CruiseChunkSendScheduler {
             stopPilotNavigation(player, "dimension-change");
             PENDING_TELEPORTS.remove(player);
             RIDE_RESYNC_COOLDOWNS.remove(player);
+            HARD_RESET_COOLDOWNS.remove(player);
             NETWORK_STATES.remove(player);
             CONTEXT_STATUSES.remove(player);
         }
@@ -1274,6 +1433,7 @@ public final class CruiseChunkSendScheduler {
         NETWORK_STATES.clear();
         PENDING_TELEPORTS.clear();
         RIDE_RESYNC_COOLDOWNS.clear();
+        HARD_RESET_COOLDOWNS.clear();
         CONTEXT_STATUSES.clear();
         ENTITY_CHUNK_TICKETS.clear();
         ENTITY_TICK_DIAGNOSTICS.clear();
@@ -1281,6 +1441,7 @@ public final class CruiseChunkSendScheduler {
         RIDE_MEMORY.clear();
         CACHE_INVALIDATIONS.clear();
         STANDSTILL_MARKS.clear();
+        STANDSTILL_REPORTS.clear();
         anomalyReported = false;
         for (LoadingState state : LOADING_STATES.values()) {
             state.clear();
