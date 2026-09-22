@@ -66,11 +66,6 @@ Core Features
 【Mod Configuration】
 - Power bonuses and fuel consumption for the Super Acceleration, Acceleration, Normal, and Eco modes can be customized in the configuration.
 - The cruise horizontal speed limit for airships, airboats, and other hovering vehicles can be configured; 0 disables the limit.
-
-【License】
-Distributed under ARR. Subject to the bundled LICENSE and preservation of attribution, license, and provenance information, unmodified official releases may be used in ordinary Minecraft play, servers, launchers, clients, and free modpacks.
-Unmodified official releases may be provided in free modpacks, client bundles, or server bundles, but the mod itself may not be charged for, resold, modified for redistribution, or stripped of copyright and license information.
-See LICENSE and DISCLAIMER for the full terms.
 '''
 
 [[dependencies.${mod_id}]]
