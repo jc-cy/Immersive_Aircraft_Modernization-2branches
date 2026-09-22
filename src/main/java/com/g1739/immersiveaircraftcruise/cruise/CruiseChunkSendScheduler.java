@@ -328,14 +328,10 @@ public final class CruiseChunkSendScheduler {
             rebuildAircraftView(player, onboard);
             return;
         }
-        VehicleEntity remembered = rememberedVehicle(player);
-        if (remembered == null || player.isDeadOrDying()) {
+        VehicleEntity remembered = restoreRememberedRide(player);
+        if (remembered == null) {
             return;
         }
-        if (!player.startRiding(remembered, true)) {
-            return;
-        }
-        remembered.positionRider(player);
         rebuildAircraftView(player, remembered);
         ImmersiveAircraftCruise.LOGGER.warn(
                 "[CruiseRide] put a player back on the aircraft the client still rode: player={}, vehicleId={}",
@@ -372,6 +368,20 @@ public final class CruiseChunkSendScheduler {
      */
     public static void hardResetRideState(ServerPlayer player, int reportedVehicleId,
                                           boolean clientControls) {
+        hardResetRideState(player, reportedVehicleId, Boolean.valueOf(clientControls));
+    }
+
+    /**
+     * The reset path used by the server's own detectors (for example the cruise standstill check).
+     * There is no client report to compare against on that path, so the log records
+     * {@code controlSeatSplit=n/a} instead of comparing the server's verdict with itself.
+     */
+    public static void hardResetRideState(ServerPlayer player, int reportedVehicleId) {
+        hardResetRideState(player, reportedVehicleId, null);
+    }
+
+    private static void hardResetRideState(ServerPlayer player, int reportedVehicleId,
+                                           Boolean clientControls) {
         if (player == null || player.hasDisconnected()) {
             return;
         }
@@ -388,9 +398,8 @@ public final class CruiseChunkSendScheduler {
                 && CruiseController.hasCruiseModule(onboard)) {
             vehicle = onboard;
         } else {
-            VehicleEntity remembered = rememberedVehicle(player);
-            if (remembered != null && !player.isDeadOrDying() && player.startRiding(remembered, true)) {
-                remembered.positionRider(player);
+            VehicleEntity remembered = restoreRememberedRide(player);
+            if (remembered != null) {
                 vehicle = remembered;
                 restored = true;
             }
@@ -416,7 +425,9 @@ public final class CruiseChunkSendScheduler {
                 "[CruiseRide] hard reset: player={}, vehicleId={}, rebuilt={}, restoredRide={}, "
                         + "serverControlSeat={}, controlSeatSplit={}, riders={}",
                 player.getScoreboardName(), vehicle.getId(), rebuilt, restored,
-                serverControls, serverControls != clientControls, vehicle.getPassengers().size());
+                serverControls,
+                clientControls == null ? "n/a" : Boolean.toString(serverControls != clientControls),
+                vehicle.getPassengers().size());
     }
 
     /**
@@ -455,11 +466,19 @@ public final class CruiseChunkSendScheduler {
      * hand. That check exists to stop wasting bandwidth on entities a player cannot see, which is not
      * a reason to leave a player who asked for a reset without their aircraft.
      */
-    private static boolean forceRebuildPairing(ServerPlayer player, VehicleEntity vehicle) {
+    /**
+     * The vanilla tracking entry of this aircraft, or {@code null} when it is not tracked right now.
+     * Both "complete the pairing" and "rebuild the pairing" need exactly this lookup, so it lives here.
+     */
+    private static TrackedEntityResync trackedEntity(VehicleEntity vehicle) {
         ServerLevel level = (ServerLevel) vehicle.level();
         Object tracked = ((ChunkMapInvoker) level.getChunkSource().chunkMap)
                 .iacruise$getEntityMap().get(vehicle.getId());
-        if (!(tracked instanceof TrackedEntityResync resync)) {
+        return tracked instanceof TrackedEntityResync resync ? resync : null;
+    }
+    private static boolean forceRebuildPairing(ServerPlayer player, VehicleEntity vehicle) {
+        TrackedEntityResync resync = trackedEntity(vehicle);
+        if (resync == null) {
             return false;
         }
         resync.iacruise$removePlayer(player);
@@ -538,10 +557,8 @@ public final class CruiseChunkSendScheduler {
      * it is a no-op for a client that already tracks the aircraft.
      */
     private static void pairAircraftWith(ServerPlayer player, VehicleEntity vehicle) {
-        ServerLevel level = (ServerLevel) vehicle.level();
-        Object tracked = ((ChunkMapInvoker) level.getChunkSource().chunkMap)
-                .iacruise$getEntityMap().get(vehicle.getId());
-        if (tracked instanceof TrackedEntityResync resync) {
+        TrackedEntityResync resync = trackedEntity(vehicle);
+        if (resync != null) {
             resync.iacruise$updatePlayer(player);
         }
     }
@@ -562,6 +579,22 @@ public final class CruiseChunkSendScheduler {
         return null;
     }
 
+    /**
+     * Puts the player back on the aircraft this session still remembers it riding, when that ride can
+     * still be restored: the vehicle must exist in this dimension (that is what {@code rememberedVehicle}
+     * checks), the player must be alive, and vanilla has to accept the seat.
+     *
+     * <p>Both repair paths share this step, so the rule for "restoring a remembered ride" lives in one
+     * place; each caller decides what to do with the aircraft it gets back.
+     */
+    private static VehicleEntity restoreRememberedRide(ServerPlayer player) {
+        VehicleEntity remembered = rememberedVehicle(player);
+        if (remembered == null || player.isDeadOrDying() || !player.startRiding(remembered, true)) {
+            return null;
+        }
+        remembered.positionRider(player);
+        return remembered;
+    }
     /** Captures the current ride before the chunk system removes the vehicle and ejects everyone. */
     public static void rememberRide(VehicleEntity vehicle) {
         Set<UUID> passengers = orderedRidePassengers(vehicle.getPassengers());
@@ -1027,8 +1060,10 @@ public final class CruiseChunkSendScheduler {
                 // therefore forced here, and the control seat only waits for a second verdict because a
                 // single one can also come from a server that stalled under load.
                 boolean controlSeat = vehicle.getControllingPassenger() == rider;
+                // The server's own detector has no client report to compare against, so it uses the
+                // two-argument reset, whose log line reports controlSeatSplit=n/a.
                 if (!controlSeat || reports >= 2) {
-                    hardResetRideState(rider, vehicle.getId(), controlSeat);
+                    hardResetRideState(rider, vehicle.getId());
                 } else {
                     repairRideState(rider, vehicle.getId());
                 }
