@@ -1,5 +1,6 @@
 package com.g1739.immersiveaircraftcruise.cruise;
 
+
 import com.g1739.immersiveaircraftcruise.CruiseItems;
 import immersive_aircraft.entity.InventoryVehicleEntity;
 import immersive_aircraft.entity.VehicleEntity;
@@ -37,6 +38,17 @@ public final class CruiseModuleData {
 
     public static boolean hasModule(VehicleEntity vehicle) {
         return findModule(vehicle).isPresent();
+    }
+
+    /**
+     * Preload loading modes stream the route from the server, so their aircraft has to keep ticking
+     * across chunk borders the way a player does. Vanilla mode never needs that guarantee.
+     */
+    public static boolean usesPreloadRoute(VehicleEntity vehicle) {
+        return findModule(vehicle)
+                .map(CruiseModuleData::read)
+                .map(route -> route.getSelectedEntry().loadingMode() != CruiseRoute.RouteLoadingMode.VANILLA)
+                .orElse(false);
     }
 
     public static CruiseRoute read(ItemStack stack) {

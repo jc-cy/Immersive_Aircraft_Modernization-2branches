@@ -1,10 +1,13 @@
 package com.g1739.immersiveaircraftcruise.client.gui;
 
+
 import com.g1739.immersiveaircraftcruise.client.CruiseHud;
+import com.g1739.immersiveaircraftcruise.cruise.CruiseController;
 import com.g1739.immersiveaircraftcruise.cruise.CruiseRoute;
 import com.g1739.immersiveaircraftcruise.cruise.CruiseVehicleAccess;
 import com.g1739.immersiveaircraftcruise.network.CruiseNetwork;
 import com.g1739.immersiveaircraftcruise.network.RouteStorageTarget;
+import com.g1739.immersiveaircraftcruise.network.SetPreloadDecelerationPacket;
 import com.g1739.immersiveaircraftcruise.network.SyncCruiseRoutePacket;
 import com.g1739.immersiveaircraftcruise.network.UpdateCruiseHudPacket;
 import immersive_aircraft.entity.VehicleEntity;
@@ -29,17 +32,12 @@ public class CruiseScreen extends Screen {
     // Main route editor layout knobs for quick position/size tuning.
     private static final int TOP_ROW_Y = 28;
     private static final int ROUTE_SETTINGS_ROW_Y = TOP_ROW_Y + 28;
+    private static final int WAYPOINT_LIST_TOP = TOP_ROW_Y + 76;
     private static final int LABEL_CONTENT_GAP = 14;
     private static final int CONTROL_GAP = 16;
     private static final int BUTTON_HORIZONTAL_PADDING = 20;
     private static final int LABEL_COLOR = 0xFFF2F2F2;
     private static final int MUTED_LABEL_COLOR = 0xFFC8C8C8;
-    private static final int TITLE_COLOR = 0xFFFFFFFF;
-    private static final int STATUS_COLOR = 0xFFD0D0D0;
-    private static final int DIM_TEXT_COLOR = 0xFFA0A0A0;
-    private static final int REACHED_WAYPOINT_COLOR = 0xFF88CC88;
-    private static final int CURRENT_WAYPOINT_COLOR = 0xFFFFE28A;
-    private static final int DEFAULT_WAYPOINT_COLOR = 0xFFD8D8D8;
     private static final int ROUTE_NAME_LABEL_X = 0;
     private static final int ROUTE_NAME_FIELD_WIDTH = 132;
     private static final int DEFAULT_ALTITUDE_FIELD_WIDTH = 64;
@@ -66,8 +64,10 @@ public class CruiseScreen extends Screen {
     private String routeName;
     private int defaultAltitude;
     private CruiseRoute.CruiseMode cruiseMode;
+    private CruiseRoute.RouteLoadingMode loadingMode;
     private CruiseRoute.LandingMode landingMode;
     private Integer landingAltitude;
+    private boolean decelerateWhenChunksNotReady;
     private int scrollOffset;
     private EditBox routeNameBox;
     private EditBox defaultAltitudeBox;
@@ -80,15 +80,12 @@ public class CruiseScreen extends Screen {
     private int dragOffsetY;
     private int runtimeSelectedRoute = -1;
 
-    public CruiseScreen(int entityId, CruiseRoute route) {
-        this(entityId, route, false);
-    }
-
-    public CruiseScreen(int entityId, CruiseRoute route, boolean readOnly) {
+    public CruiseScreen(int entityId, CruiseRoute route, boolean readOnly, boolean decelerateWhenChunksNotReady) {
         super(Component.translatable("screen.immersive_aircraft_cruise.title"));
         this.entityId = entityId;
         this.route = route.copy();
         this.readOnly = readOnly;
+        this.decelerateWhenChunksNotReady = decelerateWhenChunksNotReady;
         this.runtimeSelectedRoute = route.getSelectedRoute();
         loadSelectedRoute();
     }
@@ -112,6 +109,7 @@ public class CruiseScreen extends Screen {
         routeName = entry.name();
         defaultAltitude = entry.defaultAltitude();
         cruiseMode = entry.cruiseMode();
+        loadingMode = entry.loadingMode();
         landingMode = entry.landingMode();
         landingAltitude = entry.landingAltitude();
         waypoints.clear();
@@ -193,7 +191,7 @@ public class CruiseScreen extends Screen {
         cruiseModeButton.setFGColor(cruiseModeTextColor());
         addWritableWidget(cruiseModeButton);
 
-        int listTop = top + 76;
+        int listTop = WAYPOINT_LIST_TOP;
         int visibleRows = visibleRows(listTop);
         scrollOffset = clamp(scrollOffset, 0, maxScrollOffset(visibleRows));
         for (int row = 0; row < visibleRows; row++) {
@@ -228,6 +226,35 @@ public class CruiseScreen extends Screen {
             markDirty();
         });
         addEditBox(landingAltitudeBox);
+
+        Component loadingModeText = Component.translatable("screen.immersive_aircraft_cruise.loading_mode");
+        int loadingModeLabelX = landingRow.thirdControlX();
+        int loadingModeButtonX = loadingModeLabelX + font.width(loadingModeText) + LABEL_CONTENT_GAP;
+        Button loadingModeButton = Button.builder(loadingModeLabel(), button -> {
+            loadingMode = nextLoadingMode();
+            button.setMessage(loadingModeLabel());
+            button.setTooltip(loadingModeTooltip());
+            markDirty();
+            autoSaveDraft();
+        }).bounds(loadingModeButtonX, landingY, loadingModeButtonWidth(), 20)
+                .tooltip(loadingModeTooltip())
+                .build();
+        addWritableWidget(loadingModeButton);
+
+        if (entityId >= 0) {
+            int decelerateButtonX = loadingModeButtonX + loadingModeButtonWidth() + CONTROL_GAP;
+            Button decelerateButton = Button.builder(decelerateLabel(), button -> {
+                decelerateWhenChunksNotReady = !decelerateWhenChunksNotReady;
+                button.setMessage(decelerateLabel());
+                button.setTooltip(decelerateTooltip());
+                CruiseNetwork.sendToServer(
+                        new SetPreloadDecelerationPacket(entityId, decelerateWhenChunksNotReady));
+            }).bounds(decelerateButtonX, landingY, decelerateButtonWidth(), 20)
+                    .tooltip(decelerateTooltip())
+                    .build();
+            decelerateButton.setTooltip(decelerateTooltip());
+            addWritableWidget(decelerateButton);
+        }
 
         int buttonY = height - 28;
         addWritableWidget(Button.builder(Component.translatable("screen.immersive_aircraft_cruise.add_current"), button -> addCurrentPosition())
@@ -291,7 +318,7 @@ public class CruiseScreen extends Screen {
 
         addWritableWidget(Button.builder(Component.literal("x"), button -> {
             waypoints.remove(index);
-            scrollOffset = Math.min(scrollOffset, maxScrollOffset(visibleRows(104)));
+            scrollOffset = Math.min(scrollOffset, maxScrollOffset(visibleRows(WAYPOINT_LIST_TOP)));
             markDirty();
             autoSaveDraft();
             rebuildCruiseWidgets();
@@ -366,7 +393,7 @@ public class CruiseScreen extends Screen {
         updateDefaultAltitude();
         BlockPos pos = minecraft.player.blockPosition();
         waypoints.add(new DraftWaypoint(Integer.toString(pos.getX()), Integer.toString(pos.getZ()), "", ""));
-        scrollOffset = maxScrollOffset(visibleRows(104));
+        scrollOffset = maxScrollOffset(visibleRows(WAYPOINT_LIST_TOP));
         markDirty();
         autoSaveDraft();
         rebuildCruiseWidgets();
@@ -423,7 +450,10 @@ public class CruiseScreen extends Screen {
         if (minecraft != null && minecraft.level != null) {
             Entity entity = minecraft.level.getEntity(entityId);
             if (entity instanceof CruiseVehicleAccess access) {
-                access.iacruise$setRoute(saved.copy());
+                CruiseRoute localSaved = saved.copy();
+                CruiseController.reconcileRouteDefinitionChange(
+                        (VehicleEntity) entity, access.iacruise$getRoute(), localSaved);
+                access.iacruise$setRoute(localSaved);
             }
         }
         CruiseNetwork.sendToServer(new SyncCruiseRoutePacket(entityId, target(), saved, showMessage));
@@ -476,12 +506,38 @@ public class CruiseScreen extends Screen {
         return textWidth + BUTTON_HORIZONTAL_PADDING;
     }
 
+    private int loadingModeButtonWidth() {
+        int textWidth = 0;
+        for (CruiseRoute.RouteLoadingMode mode : CruiseRoute.RouteLoadingMode.values()) {
+            textWidth = Math.max(textWidth, font.width(Component.translatable(
+                    "screen.immersive_aircraft_cruise.loading_mode." + mode.serializedName())));
+        }
+        return textWidth + BUTTON_HORIZONTAL_PADDING;
+    }
+
     private int landingModeButtonWidth() {
         int textWidth = 0;
         for (CruiseRoute.LandingMode mode : CruiseRoute.LandingMode.values()) {
             textWidth = Math.max(textWidth, font.width(Component.translatable(
                     "screen.immersive_aircraft_cruise.landing_mode." + mode.serializedName())));
         }
+        return textWidth + BUTTON_HORIZONTAL_PADDING;
+    }
+
+    private Component decelerateLabel() {
+        return Component.translatable(decelerateWhenChunksNotReady
+                ? "screen.immersive_aircraft_cruise.decelerate.enabled"
+                : "screen.immersive_aircraft_cruise.decelerate.disabled");
+    }
+
+    private Tooltip decelerateTooltip() {
+        return Tooltip.create(Component.translatable("screen.immersive_aircraft_cruise.decelerate.tooltip"));
+    }
+
+    private int decelerateButtonWidth() {
+        int textWidth = Math.max(
+                font.width(Component.translatable("screen.immersive_aircraft_cruise.decelerate.enabled")),
+                font.width(Component.translatable("screen.immersive_aircraft_cruise.decelerate.disabled")));
         return textWidth + BUTTON_HORIZONTAL_PADDING;
     }
 
@@ -536,7 +592,8 @@ public class CruiseScreen extends Screen {
         updateDefaultAltitude();
         updateLandingAltitude();
         String name = routeName == null || routeName.isBlank() ? "Route " + (route.getSelectedRoute() + 1) : routeName.trim();
-        return new CruiseRoute.RouteEntry(name, defaultAltitude, cruiseMode, effectiveLandingModeFromWaypoints(routeWaypoints), landingAltitude, routeWaypoints);
+        return new CruiseRoute.RouteEntry(name, defaultAltitude, cruiseMode, effectiveLoadingMode(),
+                effectiveLandingModeFromWaypoints(routeWaypoints), landingAltitude, routeWaypoints);
     }
 
     private int visibleRows(int listTop) {
@@ -591,9 +648,20 @@ public class CruiseScreen extends Screen {
                 Component.translatable("screen.immersive_aircraft_cruise.cruise_mode." + effectiveCruiseMode().serializedName()));
     }
 
+    private Component loadingModeLabel() {
+        return Component.translatable("screen.immersive_aircraft_cruise.loading_mode.value",
+                Component.translatable("screen.immersive_aircraft_cruise.loading_mode."
+                        + effectiveLoadingMode().serializedName()));
+    }
+
     private Tooltip cruiseModeTooltip() {
         return Tooltip.create(Component.translatable("screen.immersive_aircraft_cruise.cruise_mode."
                 + effectiveCruiseMode().serializedName() + ".tooltip"));
+    }
+
+    private Tooltip loadingModeTooltip() {
+        return Tooltip.create(Component.translatable("screen.immersive_aircraft_cruise.loading_mode."
+                + effectiveLoadingMode().serializedName() + ".tooltip"));
     }
 
     private Tooltip landingModeTooltip() {
@@ -611,12 +679,25 @@ public class CruiseScreen extends Screen {
     }
 
     private CruiseRoute.CruiseMode nextCruiseMode() {
-        CruiseRoute.CruiseMode[] modes = CruiseRoute.CruiseMode.values();
-        return modes[(effectiveCruiseMode().ordinal() + 1) % modes.length];
+        return switch (effectiveCruiseMode()) {
+            case NORMAL -> CruiseRoute.CruiseMode.ACCELERATION;
+            case ACCELERATION -> CruiseRoute.CruiseMode.SUPER_ACCELERATION;
+            case SUPER_ACCELERATION -> CruiseRoute.CruiseMode.ECO;
+            case ECO -> CruiseRoute.CruiseMode.NORMAL;
+        };
     }
 
     private CruiseRoute.CruiseMode effectiveCruiseMode() {
         return cruiseMode == null ? CruiseRoute.CruiseMode.SUPER_ACCELERATION : cruiseMode;
+    }
+
+    private CruiseRoute.RouteLoadingMode nextLoadingMode() {
+        CruiseRoute.RouteLoadingMode[] modes = CruiseRoute.RouteLoadingMode.values();
+        return modes[(effectiveLoadingMode().ordinal() + 1) % modes.length];
+    }
+
+    private CruiseRoute.RouteLoadingMode effectiveLoadingMode() {
+        return loadingMode == null ? CruiseRoute.RouteLoadingMode.THREE_WIDE : loadingMode;
     }
 
     private CruiseRoute.LandingMode nextLandingMode() {
@@ -646,11 +727,6 @@ public class CruiseScreen extends Screen {
             return CruiseRoute.LandingMode.HOLDING_PATTERN;
         }
         return landingMode;
-    }
-
-    private boolean draftHasLandingAltitude() {
-        updateLandingAltitude();
-        return landingAltitude != null;
     }
 
     private void markDirty() {
@@ -713,7 +789,7 @@ public class CruiseScreen extends Screen {
     @Override
     public boolean mouseScrolled(double mouseX, double mouseY, double scrollX, double scrollY) {
         autoSaveDraft();
-        int listTop = 104;
+        int listTop = WAYPOINT_LIST_TOP;
         int visibleRows = visibleRows(listTop);
         int next = clamp(scrollOffset - (int) Math.signum(scrollY), 0, maxScrollOffset(visibleRows));
         if (next != scrollOffset) {
@@ -732,19 +808,20 @@ public class CruiseScreen extends Screen {
         FormRow routeRow = routeSettingsRow(left);
         FormRow landingRow = landingSettingsRow(left);
         super.render(graphics, mouseX, mouseY, partialTick);
-        graphics.drawString(font, title, left, 10, TITLE_COLOR, true);
+        graphics.drawString(font, title, left, 10, 0xFFFFFFFF, true);
         drawRouteStatus(graphics, previewRoute, left, panelWidth);
-        graphics.drawString(font, Component.literal((route.getSelectedRoute() + 1) + "/" + route.getRoutes().size()).withStyle(ChatFormatting.GRAY), left + 180, 34, DIM_TEXT_COLOR, false);
+        graphics.drawString(font, Component.literal((route.getSelectedRoute() + 1) + "/" + route.getRoutes().size()).withStyle(ChatFormatting.GRAY), left + 180, 34, 0xFFA0A0A0, false);
         graphics.drawString(font, Component.translatable("screen.immersive_aircraft_cruise.route_name"),
                 routeRow.firstLabelX(), ROUTE_SETTINGS_ROW_Y + 6, LABEL_COLOR, true);
         graphics.drawString(font, Component.translatable("screen.immersive_aircraft_cruise.default_altitude"),
                 routeRow.secondLabelX(), ROUTE_SETTINGS_ROW_Y + 6, LABEL_COLOR, true);
-        graphics.drawString(font, Component.literal("X"), left + X_FIELD_X, 92, MUTED_LABEL_COLOR, true);
-        graphics.drawString(font, Component.literal("Z"), left + Z_FIELD_X, 92, MUTED_LABEL_COLOR, true);
-        graphics.drawString(font, Component.translatable("screen.immersive_aircraft_cruise.segment_altitude"), left + ALTITUDE_FIELD_X, 92, MUTED_LABEL_COLOR, true);
-        graphics.drawString(font, Component.translatable("screen.immersive_aircraft_cruise.waypoint_name"), left + NAME_FIELD_X, 92, MUTED_LABEL_COLOR, true);
+        int waypointHeaderY = WAYPOINT_LIST_TOP - 12;
+        graphics.drawString(font, Component.literal("X"), left + X_FIELD_X, waypointHeaderY, MUTED_LABEL_COLOR, true);
+        graphics.drawString(font, Component.literal("Z"), left + Z_FIELD_X, waypointHeaderY, MUTED_LABEL_COLOR, true);
+        graphics.drawString(font, Component.translatable("screen.immersive_aircraft_cruise.segment_altitude"), left + ALTITUDE_FIELD_X, waypointHeaderY, MUTED_LABEL_COLOR, true);
+        graphics.drawString(font, Component.translatable("screen.immersive_aircraft_cruise.waypoint_name"), left + NAME_FIELD_X, waypointHeaderY, MUTED_LABEL_COLOR, true);
 
-        int listTop = 104;
+        int listTop = WAYPOINT_LIST_TOP;
         int visibleRows = visibleRows(listTop);
         boolean showRuntimeProgress = showRuntimeProgress();
         for (int row = 0; row < visibleRows; row++) {
@@ -756,20 +833,18 @@ public class CruiseScreen extends Screen {
             boolean reached = showRuntimeProgress && previewRoute.isWaypointReached(index);
             boolean current = showRuntimeProgress && previewRoute.isWaypointCurrent(index);
             String label = (reached ? "● " : current ? "▶ " : "• ") + routeDisplayName(index);
-            graphics.drawString(font, Component.literal(label), left, y, reached ? REACHED_WAYPOINT_COLOR : current ? CURRENT_WAYPOINT_COLOR : DEFAULT_WAYPOINT_COLOR, false);
+            graphics.drawString(font, Component.literal(label), left, y, reached ? 0xFF88CC88 : current ? 0xFFFFE28A : 0xFFD8D8D8, false);
         }
         if (waypoints.size() > visibleRows) {
             graphics.drawString(font, Component.literal((scrollOffset + 1) + "-" + Math.min(waypoints.size(), scrollOffset + visibleRows) + "/" + waypoints.size()).withStyle(ChatFormatting.GRAY),
-                    left + panelWidth - 54, 92, DIM_TEXT_COLOR, false);
+                    left + panelWidth - 54, waypointHeaderY, 0xFFA0A0A0, false);
         }
         graphics.drawString(font, Component.translatable("screen.immersive_aircraft_cruise.landing_mode"),
                 landingRow.firstLabelX(), height - 47, LABEL_COLOR, true);
         graphics.drawString(font, Component.translatable("screen.immersive_aircraft_cruise.landing_altitude"),
                 landingRow.secondLabelX(), height - 47, LABEL_COLOR, true);
-        if (!draftHasLandingAltitude()) {
-            graphics.drawString(font, Component.translatable("screen.immersive_aircraft_cruise.landing_mode.requires_y").withStyle(ChatFormatting.GRAY),
-                    landingRow.thirdControlX(), height - 47, DIM_TEXT_COLOR, false);
-        }
+        graphics.drawString(font, Component.translatable("screen.immersive_aircraft_cruise.loading_mode"),
+                landingRow.thirdControlX(), height - 47, LABEL_COLOR, true);
         renderHudPreview(graphics, previewRoute);
     }
 
@@ -800,12 +875,13 @@ public class CruiseScreen extends Screen {
                 : Component.translatable("screen.immersive_aircraft_cruise.route_status", routeName, nextStop).getString();
         int x = left + 126;
         int maxWidth = Math.max(0, panelWidth - 126);
-        graphics.drawString(font, fitText(text, maxWidth), x, 10, STATUS_COLOR, false);
+        graphics.drawString(font, fitText(text, maxWidth), x, 10, 0xFFD0D0D0, false);
     }
 
     private int cruiseModeTextColor() {
         return switch (effectiveCruiseMode()) {
-            case SUPER_ACCELERATION -> 0xFFFFD36A;
+            case SUPER_ACCELERATION -> 0xFFFF5A5A;
+            case ACCELERATION -> 0xFFFFD36A;
             case NORMAL -> 0xFF74B9FF;
             case ECO -> 0xFF7DFF8A;
         };
@@ -879,8 +955,8 @@ public class CruiseScreen extends Screen {
             return;
         }
         Entity entity = minecraft.level.getEntity(entityId);
-        if (entity instanceof VehicleEntity vehicle && entity instanceof CruiseVehicleAccess access) {
-            CruiseHud.renderHud(graphics, font, vehicle, access, previewRoute, width, height);
+        if (entity instanceof VehicleEntity vehicle && entity instanceof CruiseVehicleAccess) {
+            CruiseHud.renderHud(graphics, font, vehicle, previewRoute, width, height);
             int x = CruiseHud.x(width);
             int y = CruiseHud.y(height);
             graphics.renderOutline(x - 2, y - 2, CruiseHud.width() + 4, CruiseHud.height() + 4, 0xFFFFFFFF);

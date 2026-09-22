@@ -1,9 +1,11 @@
 package com.g1739.immersiveaircraftcruise.network;
 
 import com.g1739.immersiveaircraftcruise.cruise.CruiseController;
+import com.g1739.immersiveaircraftcruise.cruise.CruiseChunkSendScheduler;
 import com.g1739.immersiveaircraftcruise.cruise.CruiseModuleData;
 import com.g1739.immersiveaircraftcruise.cruise.CruiseRoute;
-import immersive_aircraft.entity.InventoryVehicleEntity;
+import com.g1739.immersiveaircraftcruise.ImmersiveAircraftCruise;
+import com.g1739.immersiveaircraftcruise.CruiseDebug;
 import immersive_aircraft.entity.VehicleEntity;
 import net.minecraft.network.FriendlyByteBuf;
 import net.minecraft.network.RegistryFriendlyByteBuf;
@@ -108,7 +110,6 @@ public class ToggleCruiseNavigationPacket implements CustomPacketPayload {
             } else {
                 boolean resumed = route.hasStartPoint();
                 route.resume(startPoint(vehicle));
-                syncVehicleInventory(player, vehicle);
                 player.displayClientMessage(Component.translatable(
                         resumed ? "message.immersive_aircraft_cruise.resumed" : "message.immersive_aircraft_cruise.enabled"), true);
             }
@@ -117,18 +118,20 @@ public class ToggleCruiseNavigationPacket implements CustomPacketPayload {
             if (vehicle instanceof com.g1739.immersiveaircraftcruise.cruise.CruiseVehicleAccess access) {
                 access.iacruise$setRoute(route.copy());
             }
+            CruiseController.rememberPilot(vehicle, player);
+            // Refresh upgrade-derived properties for every onboard client before
+            // publishing the authoritative runtime route to the pilot.
+            CruiseController.syncVehicleInventoryToPassengers(vehicle);
+            CruiseNetwork.sendToPlayer(player, new UpdateCruiseRoutePacket(vehicle.getId(), route.copy()));
+            CruiseDebug.info(ImmersiveAircraftCruise.LOGGER,
+                    "[CruiseChunks] navigation toggle sync: player={}, vehicleId={}, enabled={}, passengers={}",
+                    player.getScoreboardName(), vehicle.getId(), route.isEnabled(), vehicle.getPassengers().size());
             CruiseController.syncRouteToPassengers(vehicle, route);
         });
     }
 
     private static CruiseRoute.Waypoint startPoint(VehicleEntity vehicle) {
         return new CruiseRoute.Waypoint((int) Math.floor(vehicle.getX()), (int) Math.floor(vehicle.getZ()), null);
-    }
-
-    private static void syncVehicleInventory(ServerPlayer player, VehicleEntity vehicle) {
-        if (vehicle instanceof InventoryVehicleEntity inventoryVehicle) {
-            CruiseNetwork.sendToPlayer(player, SyncVehicleInventoryPacket.fromVehicle(inventoryVehicle));
-        }
     }
 
     private void mergeClientProgress(VehicleEntity vehicle, CruiseRoute route) {

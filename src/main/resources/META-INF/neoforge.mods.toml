@@ -5,6 +5,9 @@ license = "${mod_license}"
 [[mixins]]
 config = "immersive_aircraft_cruise.mixins.json"
 
+[[mixins]]
+config = "immersive_aircraft_cruise.embeddium.mixins.json"
+
 [[mods]]
 modId = "${mod_id}"
 version = "${mod_version}"
@@ -14,44 +17,61 @@ credits = "美术: witzig_heidi(鱼)"
 description = '''
 沉浸飞机：现代化/${mod_name}
 
-为 沉浸式飞机 增加现代化的超频巡导模块。
-提供多航线编辑、航点命名、默认飞行高度、单航点飞行高度、HUD 信息显示、燃料与液体燃料剩余显示、自动导航、暂停/继续导航、巡航超频加速，以及盘旋、常规降落、垂直降落等终点策略。
-超频巡导模块可安装到沉浸飞机升级槽；玩家可在飞机上打开航线设置，也可手持模块右键编辑同一份模块 NBT 数据。
+核心功能
+- 为沉浸式飞机增加超频巡导模块。支持全飞机全自动导航。
 
-0.2.0 更新概括：
-- 新增2个成就。
-- 新增普通模式+20%动力、节能模式-15%动力-75%燃料消耗，可按航线独立保存。
-- 优化航线设置界面，运行信息显示，如界面顶部显示当前航线与下一站，信息UI可显示当前航线名。
-- 打开航线设置界面不再暂停游戏，清空航线增加二次确认。
-- 多人模式下，飞机上模块的打开、保存、HUD 切换和导航启停只允许驾驶位玩家操作，乘客不会影响飞机模块。
-- 增加撞击保护，水平碰撞后立即退出导航模式。
-- 优化降落逻辑，终点较近时有起飞保护和飞行保护，较近时会优先修正方向，地面还会进行微调，并增加了降落精度。
-- 修复若干bug，整体降低了坠机和撞击风险.
+【航线与预加载】
+- 模块可安装到沉浸飞机升级槽，也可手持模块右键编辑航线数据。
+- 支持多航线编辑命名、飞行高度、多节点等，建议游戏内查看。
+- 每条航线可独立设置巡航模式、路线预加载模式和降落策略。
+- 路线预加载可以大幅降低高速飞行下的性能消耗。包含三种模式：不加载、直线飞行（三格宽）和 L 形飞行（单格宽）。
+- 预加载模式下均有加载保护，前方必要区块未加载时自动降低速度；性能不足或高速飞行建议开启 L 形飞行预加载。
+- 降落策略飞机可选正常降落和盘旋，飞艇额外有垂直降落。
+- 巡航模式有超加速、加速、普通、节能四档模式。
+- 各种功能已适配多人乘坐飞机，且多人乘坐飞机时，驾驶员下线会转让驾驶权。
 
-Chinese Notice
-本模组采用 ARR 协议。仅允许作者未修改发布版免费用于个人、非商业、合法的正常游戏使用。
-未经作者事先书面许可，禁止二次分发、整合打包、修改后二次发布、商业使用或 AI 训练。
-完整条款见随附 LICENSE 与 DISCLAIMER。
-以上限制是防止不怀好意的人，如无恶意可以放宽全部限制。
+【按键绑定】
+- 模块本身会显示当前绑定的导航按钮，包含状态刷新、航线图开关和导航开关。均可自行调整。
+- 其中状态刷新按钮可以强制刷新当前飞机实体，可能在异常情况下飞机卡死时有用。
+- 默认绑定键位分别为：打开导航页<,>、启动导航<.>、刷新飞机状态<ALT+导航键>。
 
-Adds a modern overclocked cruise guidance module for Immersive Aircraft.
-Features include multi-route editing, named waypoints, default and per-waypoint flight altitude, HUD information display, item and liquid fuel remaining display, auto navigation, pause/resume navigation, overclock cruise acceleration, and endpoint modes such as holding pattern, normal landing, and vertical landing.
+【HUD 信息】
+- 显示速度、燃料数量、燃料剩余时间和飞行剩余时间。
+- 飞行剩余时间按水平距离/速度估算，并显示当前航线及上下站信息。
+- 支持普通燃料和液体燃料容器。
+- 支持多人驾驶位权限、乘客只读信息界面、撞击保护、精细降落控制和成就进度。
 
-0.2.0 Update Summary:
-- Added 2 advancements.
-- Added Normal Mode with +20% power and Eco Mode with -15% power and -75% fuel consumption; each route saves its own mode independently.
-- Improved the route setup screen and runtime information display, including current route and next stop in the screen header, plus the current route name in the info HUD.
-- Opening the route setup screen no longer pauses the game, and clearing a route now requires a second confirmation.
-- In multiplayer, opening and saving aircraft module routes, toggling the HUD, and starting or stopping navigation are only allowed for the pilot seat player; passengers cannot affect aircraft modules.
-- Added impact protection: horizontal collisions now immediately exit navigation mode.
-- Optimized landing logic with takeoff and in-flight safeguards near the destination. At close range, aircraft now prioritize correcting their heading, perform ground fine-tuning when applicable, and land more precisely.
-- Fixed several bugs, reducing the overall risk of aircraft crashes and collisions.
+【模组配置】
+- 超加速、加速、普通、节能四档模式的动力加成和燃料消耗可在配置中自定义。
+- 飞艇、汽艇等可悬停类的巡航水平速度上限可配置；设为 0 表示不限制。
 
-English Notice
-Distributed under ARR.
-No redistribution, repacks, modified re-releases, commercial use, or AI training without prior written permission.
-See LICENSE and DISCLAIMER for the full terms.
-The above restrictions are in place to prevent malicious individuals. If there is no ill intent, all the restrictions can be relaxed.
+Core Features
+- Adds an overclocked cruise guidance module to Immersive Aircraft, supporting fully automatic navigation for all aircraft.
+
+【Routes & Preloading】
+- Install the module in an Immersive Aircraft upgrade slot, or edit route data while holding the module.
+- Supports editing and naming multiple routes, setting flight altitude, and configuring multiple waypoints; see the in-game interface for details.
+- Each route can independently configure its cruise mode, route preloading mode, and landing strategy.
+- Route preloading can greatly reduce performance overhead during high-speed flight. It offers three modes: None, Three-wide flight (three chunks wide), and L-shaped flight (one chunk wide).
+- All preloading modes include load protection: when the required chunks ahead are not loaded, the aircraft automatically reduces speed. L-shaped preloading is recommended when performance is limited or when flying at high speed.
+- Aircraft can choose normal landing or holding pattern; airships additionally support vertical landing.
+- Cruise modes include Super Acceleration, Acceleration, Normal, and Eco.
+- All features are adapted for aircraft carrying multiple passengers, and when the pilot logs out of a multiplayer aircraft, pilot control is handed over to the remaining passenger.
+
+【Key Bindings】
+- The module itself shows the currently bound navigation keys, including state refresh, route screen toggle, and navigation toggle. All of them can be adjusted as you like.
+- The state refresh key can force-refresh the current aircraft entity, which may help when the aircraft is stuck in abnormal situations.
+- The default key bindings are: open navigation page <,>, start navigation <.>, refresh aircraft state <ALT + navigation key>.
+
+【HUD Information】
+- Displays speed, fuel amount, fuel time remaining, and flight time remaining.
+- Flight time is estimated from horizontal distance and speed; the HUD also shows the current route and neighboring stops.
+- Supports item fuel and liquid fuel containers.
+- Includes multiplayer pilot permissions, passenger read-only information, collision protection, precise landing control, and advancements.
+
+【Mod Configuration】
+- Power bonuses and fuel consumption for the Super Acceleration, Acceleration, Normal, and Eco modes can be customized in the configuration.
+- The cruise horizontal speed limit for airships, airboats, and other hovering vehicles can be configured; 0 disables the limit.
 '''
 
 [[dependencies.${mod_id}]]

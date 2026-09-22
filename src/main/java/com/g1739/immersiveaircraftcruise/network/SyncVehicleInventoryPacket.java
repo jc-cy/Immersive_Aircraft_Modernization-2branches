@@ -1,5 +1,6 @@
 package com.g1739.immersiveaircraftcruise.network;
 
+
 import com.g1739.immersiveaircraftcruise.client.ClientPacketHandlers;
 import immersive_aircraft.entity.InventoryVehicleEntity;
 import immersive_aircraft.entity.inventory.VehicleInventoryDescription;

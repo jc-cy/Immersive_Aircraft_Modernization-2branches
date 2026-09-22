@@ -1,5 +1,6 @@
 package com.g1739.immersiveaircraftcruise.mixin;
 
+
 import immersive_aircraft.entity.InventoryVehicleEntity;
 import immersive_aircraft.screen.VehicleScreenHandler;
 import net.minecraft.world.entity.player.Player;

@@ -1,0 +1,13 @@
+{
+  "required": false,
+  "minVersion": "0.8",
+  "package": "com.g1739.immersiveaircraftcruise.mixin",
+  "compatibilityLevel": "JAVA_21",
+  "refmap": "immersive_aircraft_cruise.refmap.json",
+  "client": [
+    "EmbeddiumRenderSectionManagerMixin"
+  ],
+  "injectors": {
+    "defaultRequire": 0
+  }
+}

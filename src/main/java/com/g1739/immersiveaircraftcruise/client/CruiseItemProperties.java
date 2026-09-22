@@ -1,5 +1,6 @@
 package com.g1739.immersiveaircraftcruise.client;
 
+
 import com.g1739.immersiveaircraftcruise.CruiseItems;
 import com.g1739.immersiveaircraftcruise.ImmersiveAircraftCruise;
 import com.g1739.immersiveaircraftcruise.cruise.CruiseModuleData;

@@ -1,5 +1,6 @@
 package com.g1739.immersiveaircraftcruise.network;
 
+
 import net.minecraft.network.FriendlyByteBuf;
 
 public enum RouteStorageTarget {

@@ -1,5 +1,6 @@
 package com.g1739.immersiveaircraftcruise.network;
 
+
 import com.g1739.immersiveaircraftcruise.cruise.CruiseController;
 import com.g1739.immersiveaircraftcruise.cruise.CruiseRoute;
 import immersive_aircraft.entity.VehicleEntity;
@@ -89,7 +90,8 @@ public class RequestOpenCruiseScreenPacket implements CustomPacketPayload {
                         ? CruiseController.routeForOpeningScreen(vehicle, packet.selectedRoute,
                         packet.currentIndex, packet.holdingPattern, packet.initialAltitudeReached, packet.startPoint).copy()
                         : CruiseController.currentRoute(vehicle).copy();
-                CruiseNetwork.sendToPlayer(player, new OpenCruiseScreenPacket(vehicle.getId(), route.copy(), !pilot));
+                CruiseNetwork.sendToPlayer(player, new OpenCruiseScreenPacket(vehicle.getId(), route.copy(), !pilot,
+                        CruiseController.preloadAutoDeceleration()));
             }
         });
     }

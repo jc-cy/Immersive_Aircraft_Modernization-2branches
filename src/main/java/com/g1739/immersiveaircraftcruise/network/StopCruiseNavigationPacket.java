@@ -1,5 +1,6 @@
 package com.g1739.immersiveaircraftcruise.network;
 
+
 import com.g1739.immersiveaircraftcruise.cruise.CruiseController;
 import com.g1739.immersiveaircraftcruise.cruise.CruiseNavigationStopReason;
 import com.g1739.immersiveaircraftcruise.cruise.CruiseRoute;
@@ -88,7 +89,13 @@ public class StopCruiseNavigationPacket implements CustomPacketPayload {
                 return;
             }
             Entity root = player.getRootVehicle();
-            if (!(root instanceof VehicleEntity vehicle) || !CruiseController.isPilot(vehicle, player)) {
+            VehicleEntity vehicle = root instanceof VehicleEntity rootVehicle
+                    && rootVehicle.getId() == packet.entityId
+                    ? rootVehicle
+                    : player.serverLevel().getEntity(packet.entityId) instanceof VehicleEntity packetVehicle
+                    ? packetVehicle
+                    : null;
+            if (vehicle == null || !CruiseController.isPilot(vehicle, player)) {
                 return;
             }
             if (!CruiseController.hasCruiseModule(vehicle)) {
@@ -97,6 +104,10 @@ public class StopCruiseNavigationPacket implements CustomPacketPayload {
 
             CruiseRoute route = CruiseController.currentRoute(vehicle).copy();
             if (!route.isEnabled() || route.getSelectedEntry().waypoints().isEmpty()) {
+                // The client can report a collision after its local entity/root was
+                // already detached from a missing chunk. Return the server snapshot
+                // so its local enabled flag cannot remain stale.
+                CruiseNetwork.sendToPlayer(player, new UpdateCruiseRoutePacket(vehicle.getId(), route.copy()));
                 return;
             }
             packet.mergeClientProgress(vehicle, route);

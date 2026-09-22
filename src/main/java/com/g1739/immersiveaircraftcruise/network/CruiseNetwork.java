@@ -1,5 +1,6 @@
 package com.g1739.immersiveaircraftcruise.network;
 
+
 import com.g1739.immersiveaircraftcruise.ImmersiveAircraftCruise;
 import net.minecraft.network.protocol.common.custom.CustomPacketPayload;
 import net.minecraft.resources.ResourceLocation;
@@ -11,7 +12,7 @@ import net.neoforged.neoforge.network.registration.PayloadRegistrar;
 
 @EventBusSubscriber(modid = ImmersiveAircraftCruise.MOD_ID, bus = EventBusSubscriber.Bus.MOD)
 public final class CruiseNetwork {
-    private static final String PROTOCOL_VERSION = "19";
+    private static final String PROTOCOL_VERSION = "30";
 
     private CruiseNetwork() {
     }
@@ -45,5 +46,11 @@ public final class CruiseNetwork {
         registrar.playToClient(UpdateCruiseFuelPacket.TYPE, UpdateCruiseFuelPacket.STREAM_CODEC, UpdateCruiseFuelPacket::handle);
         registrar.playToServer(UpdateCruiseBoostPacket.TYPE, UpdateCruiseBoostPacket.STREAM_CODEC, UpdateCruiseBoostPacket::handle);
         registrar.playToClient(SyncVehicleInventoryPacket.TYPE, SyncVehicleInventoryPacket.STREAM_CODEC, SyncVehicleInventoryPacket::handle);
+        registrar.playToServer(UpdateCruisePilotSpeedPacket.TYPE, UpdateCruisePilotSpeedPacket.STREAM_CODEC, UpdateCruisePilotSpeedPacket::handle);
+        registrar.playToClient(UpdateCruiseAccelerationPermitPacket.TYPE, UpdateCruiseAccelerationPermitPacket.STREAM_CODEC, UpdateCruiseAccelerationPermitPacket::handle);
+        registrar.playToServer(CruiseChunkStatePacket.TYPE, CruiseChunkStatePacket.STREAM_CODEC, CruiseChunkStatePacket::handle);
+        registrar.playToClient(CruiseRouteChunkPacket.TYPE, CruiseRouteChunkPacket.STREAM_CODEC, CruiseRouteChunkPacket::handle);
+        registrar.playToServer(RequestCruiseRideResyncPacket.TYPE, RequestCruiseRideResyncPacket.STREAM_CODEC, RequestCruiseRideResyncPacket::handle);
+        registrar.playToServer(SetPreloadDecelerationPacket.TYPE, SetPreloadDecelerationPacket.STREAM_CODEC, SetPreloadDecelerationPacket::handle);
     }
 }

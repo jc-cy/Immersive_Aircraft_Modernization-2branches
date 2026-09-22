@@ -10,11 +10,11 @@ val immersiveAircraftVersion = "1.4.6+1.21.1+neoforge"
 
 val modId = "immersive_aircraft_cruise"
 val modName = "Immersive_Aircraft_Modernization"
-val modVersion = "0.2.0"
+val modVersion = "1.0.0"
 val modGroupId = "com.g1739.immersiveaircraftcruise"
 val modAuthors = "交错次元"
 val modLicense = "All Rights Reserved"
-val modDescription = "Adds a modern overclocked cruise guidance module for Immersive Aircraft, with route editing, auto navigation, HUD fuel display, and landing modes."
+val modDescription = "Adds a configurable overclocked cruise guidance module for Immersive Aircraft, with route preloading, auto navigation, dual HUD time estimates, and landing modes."
 
 val localImmersiveAircraftJar = file("../local-deps/immersive_aircraft-1.4.6+1.21.1-neoforge.jar")
 val localImmersiveAircraftEnabled = providers.gradleProperty("immersive_aircraft_use_local")

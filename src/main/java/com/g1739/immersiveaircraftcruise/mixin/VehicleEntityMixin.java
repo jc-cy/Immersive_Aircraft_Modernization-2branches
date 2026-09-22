@@ -1,5 +1,6 @@
 package com.g1739.immersiveaircraftcruise.mixin;
 
+
 import com.g1739.immersiveaircraftcruise.cruise.CruiseController;
 import com.g1739.immersiveaircraftcruise.cruise.CruiseModuleData;
 import com.g1739.immersiveaircraftcruise.cruise.CruiseRoute;
@@ -54,7 +55,9 @@ public abstract class VehicleEntityMixin implements CruiseVehicleAccess {
 
     @Inject(method = {"tick", "m_8119_"}, at = @At("TAIL"), remap = false)
     private void immersive_aircraft_cruise$afterTick(CallbackInfo ci) {
-        CruiseController.serverProgressTick((VehicleEntity) (Object) this);
+        VehicleEntity vehicle = (VehicleEntity) (Object) this;
+        CruiseController.serverProgressTick(vehicle);
+        CruiseController.synchronizeCruiseMovement(vehicle, "vehicle-tick");
     }
 
     @Inject(method = {"tick", "m_8119_"}, at = @At(value = "INVOKE", target = "Limmersive_aircraft/entity/VehicleEntity;updateController()V"), remap = false)

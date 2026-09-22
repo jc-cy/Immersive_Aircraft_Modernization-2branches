@@ -1,8 +1,8 @@
 package com.g1739.immersiveaircraftcruise.network;
 
+
 import com.g1739.immersiveaircraftcruise.cruise.CruiseController;
 import immersive_aircraft.entity.VehicleEntity;
-import net.minecraft.network.FriendlyByteBuf;
 import net.minecraft.network.RegistryFriendlyByteBuf;
 import net.minecraft.network.codec.StreamCodec;
 import net.minecraft.network.protocol.common.custom.CustomPacketPayload;
@@ -19,13 +19,13 @@ public record UpdateCruiseBoostPacket(int entityId, boolean boosting, float boos
         boostLevel = Mth.clamp(boosting ? boostLevel : 0.0f, 0.0f, 1.0f);
     }
 
-    public void encode(FriendlyByteBuf buffer) {
+    public void encode(RegistryFriendlyByteBuf buffer) {
         buffer.writeInt(entityId);
         buffer.writeBoolean(boosting);
         buffer.writeFloat(boostLevel);
     }
 
-    public static UpdateCruiseBoostPacket decode(FriendlyByteBuf buffer) {
+    public static UpdateCruiseBoostPacket decode(RegistryFriendlyByteBuf buffer) {
         return new UpdateCruiseBoostPacket(buffer.readInt(), buffer.readBoolean(), buffer.readFloat());
     }
 

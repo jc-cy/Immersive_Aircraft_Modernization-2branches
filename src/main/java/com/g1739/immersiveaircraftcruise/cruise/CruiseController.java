@@ -1,12 +1,15 @@
 package com.g1739.immersiveaircraftcruise.cruise;
 
 import com.g1739.immersiveaircraftcruise.ImmersiveAircraftCruise;
+import com.g1739.immersiveaircraftcruise.CruiseDebug;
 import com.g1739.immersiveaircraftcruise.mixin.EngineVehicleAccessor;
 import com.g1739.immersiveaircraftcruise.network.CruiseNetwork;
 import com.g1739.immersiveaircraftcruise.network.StopCruiseNavigationPacket;
+import com.g1739.immersiveaircraftcruise.network.UpdateCruiseAccelerationPermitPacket;
 import com.g1739.immersiveaircraftcruise.network.UpdateCruiseBoostPacket;
 import com.g1739.immersiveaircraftcruise.network.UpdateCruiseFuelPacket;
 import com.g1739.immersiveaircraftcruise.network.UpdateCruiseRoutePacket;
+import com.g1739.immersiveaircraftcruise.network.SyncVehicleInventoryPacket;
 import immersive_aircraft.entity.AirplaneEntity;
 import immersive_aircraft.entity.EngineVehicle;
 import immersive_aircraft.entity.InventoryVehicleEntity;
@@ -17,8 +20,10 @@ import immersive_aircraft.entity.inventory.slots.SlotDescription;
 import immersive_aircraft.entity.misc.BoundingBoxDescriptor;
 import immersive_aircraft.item.upgrade.VehicleStat;
 import net.minecraft.advancements.AdvancementHolder;
+import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.network.chat.Component;
 import net.minecraft.resources.ResourceLocation;
+import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.util.Mth;
 import net.minecraft.world.entity.Entity;
@@ -27,17 +32,47 @@ import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.phys.Vec3;
 import net.neoforged.neoforge.capabilities.Capabilities;
+import net.neoforged.neoforge.common.NeoForge;
+import net.neoforged.neoforge.event.tick.ServerTickEvent;
 import net.neoforged.neoforge.fluids.FluidStack;
 import net.neoforged.neoforge.fluids.capability.IFluidHandlerItem;
 import org.joml.Matrix3f;
 import org.joml.Vector3f;
 
+import java.util.Collections;
+import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
+import java.util.Set;
 import java.util.WeakHashMap;
 
 public final class CruiseController {
     private static final double WAYPOINT_RADIUS = 16.0;
+    /** Below this heading error the first centerline is selected once. */
+    private static final float L_AXIS_SELECTION_YAW_LIMIT = 15.0f;
+    /** Scale the final few degrees down before the direct parallel snap. */
+    private static final float L_FINE_TURN_INPUT = 0.35f;
+    private static final float L_FINE_TURN_YAW_MULTIPLIER = 3.0f;
+    /** Damps the aircraft's native 10-tick steering interpolation. */
+    private static final float L_CONTINUOUS_TURN_RATE_DAMPING = 1.5f;
+    /** Keep the aircraft within half a block on either side of the center line. */
+    private static final double L_CENTERLINE_LOCK_DISTANCE = 0.5d;
+    /** A short forward control horizon keeps tiny offsets from becoming 45 degree turns. */
+    private static final double L_CENTERLINE_LOOKAHEAD = 16.0d;
+    private static final double L_CENTERLINE_LOOKAHEAD_TICKS = 2.0d;
+    /** Predict lateral drift long enough to compensate for the aircraft input smoothing. */
+    private static final double L_CENTERLINE_DAMPING_HORIZON_TICKS = 10.0d;
+    private static final double L_CENTERLINE_HOLD_PREDICTED_ERROR = 0.5d;
+    private static final double L_CENTERLINE_HOLD_LATERAL_SPEED = 0.08d;
+    private static final float L_CENTERLINE_HOLD_TURN_RATE = 0.05f;
+    private static final int L_TURN_APPROACH = 0;
+    private static final int L_TURN_HOLD = 2;
+    private static final int L_TURN_DEBUG_SAMPLE_INTERVAL = 5;
+    /** VehicleEntity constructs every input interpolator with ten native steps. */
+    private static final double L_NATIVE_INPUT_INTERPOLATION_STEPS = 10.0d;
+    /** Upper bound for the side-effect-free turn prediction loop. */
+    private static final int L_TURN_PREDICTION_MAX_TICKS = 180;
     private static final double FINAL_ACCELERATION_CUTOFF = 100.0;
     private static final double VERTICAL_AIRCRAFT_LANDING_HORIZONTAL_RADIUS = 1.0;
     private static final double FAST_LANDING_HORIZONTAL_RADIUS = 1.0;
@@ -46,9 +81,7 @@ public final class CruiseController {
     private static final double LANDING_ALTITUDE_RADIUS = 1.0;
     private static final double FAST_LANDING_PLAN_ALTITUDE_RADIUS = 1.0;
     private static final double FAST_LANDING_COMPLETION_ALTITUDE_RADIUS = 1.0;
-    private static final double FAST_LANDING_POST_BRAKE_ALTITUDE_RADIUS = 1.0;
     private static final double FAST_LANDING_POST_BRAKE_STOP_SPEED = 0.06;
-    private static final double LANDING_STOP_SPEED = 0.06;
     private static final double LANDING_VERTICAL_STOP_SPEED = 0.08;
     private static final int POST_LANDING_BRAKE_TICKS = 100;
     private static final double FAST_LANDING_DESCENT_BUFFER = 8.0;
@@ -82,7 +115,6 @@ public final class CruiseController {
     private static final float ROTORCRAFT_TOUCHDOWN_BRAKE_INPUT = 0.18f;
     private static final int ROTORCRAFT_FAST_LANDING_VERTICAL_SIMULATION_TICKS = 1200;
     private static final int ROTORCRAFT_FAST_LANDING_VERTICAL_COAST_TICKS = 100;
-    private static final double ROTORCRAFT_FAST_LANDING_COMPLETION_ALTITUDE_RADIUS = 1.0;
     private static final double FAST_LANDING_LATERAL_DEAD_ZONE = 0.5;
     private static final float AIRPLANE_LANDING_PITCH_LIMIT = 85.0f;
     private static final double AIRPLANE_GROUND_APPROACH_DEAD_ZONE = 0.25;
@@ -125,17 +157,26 @@ public final class CruiseController {
     private static final float BOOST_RISE_PER_TICK = 0.08f;
     private static final float BOOST_FALL_PER_TICK = 0.06f;
     private static final int HUD_SYNC_INTERVAL_TICKS = 5;
+    private static final int PILOT_SPEED_TIMEOUT_TICKS = 20;
     private static final int BOOST_SYNC_INTERVAL_TICKS = 5;
     private static final int BOOST_SYNC_LEVEL_STEPS = 20;
-    private static final double HUD_SPEED_MAX = 512.0d;
+    private static final float PILOT_SPEED_MAX = 512.0f;
     private static final float SPEED_ADVANCEMENT_THRESHOLD = 117.0f;
     private static final ResourceLocation SPEED_ADVANCEMENT_ID = ResourceLocation.fromNamespaceAndPath(ImmersiveAircraftCruise.MOD_ID, "speed_117");
     private static final Map<VehicleEntity, Float> TURN_MEMORY = new WeakHashMap<>();
+    private static final Map<VehicleEntity, LAlignmentPlan> L_ALIGNMENT_PLANS = new WeakHashMap<>();
+    private static final Map<VehicleEntity, LTurnState> L_TURN_STATES = new WeakHashMap<>();
+    private static final Map<VehicleEntity, Float> L_PENDING_HEADING_SNAPS = new WeakHashMap<>();
+    private static final Map<VehicleEntity, LTurnDebugState> L_TURN_DEBUG_STATES = new WeakHashMap<>();
     private static final Map<VehicleEntity, Float> ALTITUDE_MEMORY = new WeakHashMap<>();
     private static final Map<EngineVehicle, Float> BOOST_LEVEL = new WeakHashMap<>();
     private static final Map<EngineVehicle, Float> BOOST_TARGET_LEVEL = new WeakHashMap<>();
+    private static final Map<VehicleEntity, Boolean> BOOST_REQUESTED = new WeakHashMap<>();
+    private static final Map<VehicleEntity, Boolean> PRELOAD_ACCELERATION_PERMITTED = new WeakHashMap<>();
+    private static final Map<VehicleEntity, Boolean> LAST_SENT_ACCELERATION_PERMITTED = new WeakHashMap<>();
     private static final Map<VehicleEntity, Vec3> CONTROLLER_VELOCITY_BEFORE = new WeakHashMap<>();
-    private static final Map<VehicleEntity, SpeedSample> HUD_SPEED_SAMPLES = new WeakHashMap<>();
+    /** Last speed reported by the local pilot; expired values are not used for HUD sync. */
+    private static final Map<VehicleEntity, PilotSpeedSample> PILOT_SPEEDS = new WeakHashMap<>();
     private static final Map<VehicleEntity, ItemStack> ACTIVE_MODULE = new WeakHashMap<>();
     private static final Map<VehicleEntity, String> ACTIVE_MODULE_ID = new WeakHashMap<>();
     private static final Map<VehicleEntity, ServerPlayer> LAST_PILOT = new WeakHashMap<>();
@@ -149,7 +190,47 @@ public final class CruiseController {
     private static final Map<VehicleEntity, Integer> POST_LANDING_STOPPED = new WeakHashMap<>();
     private static final Map<VehicleEntity, BoostSyncState> LAST_CLIENT_BOOST_SYNC = new WeakHashMap<>();
 
+    private record LAlignmentPlan(int stage, boolean firstAxis, float targetYaw,
+                                  boolean axisOnly, double initialLateralError) {
+    }
+
+    private record LTurnState(float targetYaw, int sign, int phase) {
+    }
+
+    private record LTurnDebugState(float targetYaw, int phase, int sign, int ticksSinceSample) {
+    }
+
+    private record LTurnEstimate(double alongDistance, int ticks) {
+    }
+
+    private record PilotSpeedSample(float speed, int serverTick) {
+    }
+
     private CruiseController() {
+    }
+
+    public static void register() {
+        NeoForge.EVENT_BUS.addListener(CruiseController::onServerTick);
+    }
+
+    private static void onServerTick(ServerTickEvent.Post event) {
+        if (event.getServer().getTickCount() % HUD_SYNC_INTERVAL_TICKS != 0) {
+            return;
+        }
+        syncFuelInfo(event.getServer());
+    }
+
+    private static void syncFuelInfo(MinecraftServer server) {
+        Set<EngineVehicle> vehicles = Collections.newSetFromMap(new IdentityHashMap<>());
+        for (ServerPlayer player : server.getPlayerList().getPlayers()) {
+            if (player.getRootVehicle() instanceof EngineVehicle vehicle
+                    && CruiseModuleData.hasModule(vehicle)) {
+                vehicles.add(vehicle);
+            }
+        }
+        for (EngineVehicle vehicle : vehicles) {
+            syncFuelInfo(vehicle);
+        }
     }
 
     public static boolean hasCruiseModule(Entity entity) {
@@ -160,16 +241,112 @@ public final class CruiseController {
         return player != null && vehicle.getControllingPassenger() == player;
     }
 
+    /**
+     * The switch behind the preload screen's "auto slowdown" button: slow a cruise aircraft down while
+     * the route ahead is still loading. Session state on purpose - the screen is the only place it is
+     * set, so nothing can disagree with a config file.
+     */
+    private static boolean preloadAutoDeceleration = true;
+
+    public static boolean preloadAutoDeceleration() {
+        return preloadAutoDeceleration;
+    }
+
+    public static void setPreloadAutoDeceleration(boolean enabled) {
+        preloadAutoDeceleration = enabled;
+    }
+
+    /** Returns whether a player is still seated on the aircraft's root vehicle. */
+    public static boolean isOnboard(VehicleEntity vehicle, ServerPlayer player) {
+        return vehicle != null && player != null && player.getRootVehicle() == vehicle;
+    }
+
+    /**
+     * Keeps the complete cruise group paired: the aircraft itself and every
+     * onboard player must remain visible to every other onboard player.  The
+     * predicate is intentionally module-based (rather than route-enabled) so a
+     * dismounted/disabled transition is handed back to vanilla tracking cleanly.
+     */
+    public static boolean shouldKeepCruiseEntityTracked(Entity tracked, ServerPlayer observer) {
+        if (observer == null || tracked == observer) {
+            return false;
+        }
+        VehicleEntity vehicle;
+        if (tracked instanceof VehicleEntity candidate) {
+            vehicle = candidate;
+            return hasCruiseModule(vehicle) && isOnboard(vehicle, observer);
+        }
+        if (!(tracked instanceof ServerPlayer trackedPlayer)
+                || !(trackedPlayer.getRootVehicle() instanceof VehicleEntity candidate)) {
+            return false;
+        }
+        vehicle = candidate;
+        return hasCruiseModule(vehicle)
+                && isOnboard(vehicle, trackedPlayer)
+                && isOnboard(vehicle, observer);
+    }
+
+    /**
+     * One authoritative movement transaction for all server-side occupants.
+     * This is called after both native vehicle ticks and client move packets so
+     * neither path can leave a passenger at a stale position/chunk center.
+     */
+    public static void synchronizeCruiseMovement(VehicleEntity vehicle, String trigger) {
+        if (vehicle == null || vehicle.level().isClientSide() || !hasCruiseModule(vehicle)) {
+            return;
+        }
+        CruiseChunkSendScheduler.updateEntityChunkTicket(vehicle);
+        int corrected = 0;
+        for (Entity passenger : vehicle.getPassengers()) {
+            corrected += synchronizePassengerTree(vehicle, passenger, trigger);
+        }
+        if (corrected > 0) {
+            CruiseDebug.debug(ImmersiveAircraftCruise.LOGGER,
+                    "[CruiseChunks] movement transaction: vehicleId={}, trigger={}, passengers={}, tick={}",
+                    vehicle.getId(), trigger, corrected, vehicle.tickCount);
+        }
+    }
+
+    private static int synchronizePassengerTree(VehicleEntity vehicle, Entity passenger, String trigger) {
+        int corrected = 0;
+        if (passenger instanceof ServerPlayer player && isOnboard(vehicle, player)) {
+            double beforeDistance = Math.sqrt(player.distanceToSqr(vehicle));
+            double beforeX = player.getX();
+            double beforeY = player.getY();
+            double beforeZ = player.getZ();
+            vehicle.positionRider(player);
+            player.serverLevel().getChunkSource().move(player);
+            corrected++;
+            if (beforeDistance > 1.0d || beforeX != player.getX()
+                    || beforeY != player.getY() || beforeZ != player.getZ()) {
+                CruiseDebug.info(ImmersiveAircraftCruise.LOGGER,
+                        "[CruiseChunks] passenger transaction correction: player={}, vehicleId={}, "
+                                + "trigger={}, distanceBefore={}, posAfter={}, playerChunk={}, vehicleChunk={}",
+                        player.getScoreboardName(), vehicle.getId(), trigger, beforeDistance,
+                        String.format("%.2f/%.2f/%.2f", player.getX(), player.getY(), player.getZ()),
+                        player.chunkPosition(), vehicle.chunkPosition());
+            }
+        }
+        for (Entity nested : passenger.getPassengers()) {
+            corrected += synchronizePassengerTree(vehicle, nested, trigger);
+        }
+        return corrected;
+    }
+
+    private static boolean isLocalClientPilot(VehicleEntity vehicle) {
+        return vehicle.level().isClientSide()
+                && vehicle.getControllingPassenger() instanceof Player player
+                && player.isLocalPlayer();
+    }
+
     private static boolean hasEngineFuel(EngineVehicle engineVehicle) {
         return engineVehicle.getFuelUtilization() > 0.0f;
     }
 
     private static boolean canApplyCruiseModifiers(EngineVehicle vehicle, CruiseVehicleAccess access) {
-        if (!CruiseModuleData.hasModule(vehicle)) {
-            return false;
-        }
         CruiseRoute route = access.iacruise$getRoute();
-        return route != null && route.isEnabled();
+        return route != null && route.isEnabled()
+                && (vehicle.level().isClientSide() || CruiseModuleData.hasModule(vehicle));
     }
 
     public static void serverEngineTick(EngineVehicle engineVehicle) {
@@ -186,7 +363,6 @@ public final class CruiseController {
                 pauseNavigationForNoFuel(vehicle, access, route, false);
             }
         }
-        syncFuelInfo(vehicle, engineVehicle);
     }
 
     public static void tick(VehicleEntity vehicle, boolean braking) {
@@ -194,19 +370,38 @@ public final class CruiseController {
             return;
         }
         boolean clientSide = vehicle.level().isClientSide();
+        if (clientSide && !isLocalClientPilot(vehicle)) {
+            // Only the local pilot predicts cruise motion. Other clients render
+            // the server vehicle and keep their own route/cache viewer state.
+            return;
+        }
         boolean automaticBrakeInput = Boolean.TRUE.equals(AUTO_BRAKE_INPUT.remove(vehicle));
+        CruiseRoute clientRoute = clientSide ? access.iacruise$getRoute() : null;
+        boolean hasAuthoritativeClientRoute = clientRoute != null && clientRoute.isEnabled();
 
-        if (!CruiseModuleData.hasModule(vehicle)) {
+        if (!CruiseModuleData.hasModule(vehicle) && !hasAuthoritativeClientRoute) {
             ACTIVE_MODULE.remove(vehicle);
+            CruiseRoute route = access.iacruise$getRoute();
+            if (!clientSide) {
+                route.stopNavigation();
+                access.iacruise$setRoute(route);
+                syncDisabledRouteToPilot(vehicle, route);
+            } else {
+                route.stopNavigation();
+            }
             LAST_PILOT.remove(vehicle);
-            LAST_DISABLED_SYNC_PILOT.remove(vehicle);
-            access.iacruise$getRoute().stopNavigation();
             access.iacruise$setBoosting(false);
+            BOOST_REQUESTED.remove(vehicle);
+            PRELOAD_ACCELERATION_PERMITTED.remove(vehicle);
+            LAST_SENT_ACCELERATION_PERMITTED.remove(vehicle);
             if (vehicle instanceof EngineVehicle engineVehicle) {
                 BOOST_LEVEL.remove(engineVehicle);
                 BOOST_TARGET_LEVEL.remove(engineVehicle);
             }
             TURN_MEMORY.remove(vehicle);
+            L_ALIGNMENT_PLANS.remove(vehicle);
+            L_TURN_STATES.remove(vehicle);
+            L_PENDING_HEADING_SNAPS.remove(vehicle);
             ALTITUDE_MEMORY.remove(vehicle);
             LANDING_ACTIVE.remove(vehicle);
             FAST_LANDING_FINAL_BRAKE_ACTIVE.remove(vehicle);
@@ -217,7 +412,7 @@ public final class CruiseController {
             return;
         }
 
-        CruiseRoute route = clientSide ? access.iacruise$getRoute() : serverRoute(vehicle, access);
+        CruiseRoute route = clientSide ? clientRoute : serverRoute(vehicle, access);
         if (!clientSide && vehicle.tickCount % 20 == 0) {
             syncRouteToClient(vehicle, route);
         }
@@ -226,6 +421,7 @@ public final class CruiseController {
             if (!clientSide) {
                 syncDisabledRouteToPilot(vehicle, route);
             }
+            L_PENDING_HEADING_SNAPS.remove(vehicle);
             stopNavigationEffects(vehicle, access);
             return;
         }
@@ -247,7 +443,6 @@ public final class CruiseController {
                 return;
             }
         }
-
         if (handleNavigationHorizontalCollision(vehicle, access, route, clientSide)) {
             return;
         }
@@ -275,13 +470,26 @@ public final class CruiseController {
 
         CruiseRoute.Waypoint waypoint = route.getTarget();
         Vec3 referencePosition = horizontalReferencePosition(vehicle);
-        double dx = waypoint.x() + 0.5 - referencePosition.x;
-        double dz = waypoint.z() + 0.5 - referencePosition.z;
-        double horizontalDistance = Math.sqrt(dx * dx + dz * dz);
-        if (tickFinalLandingApproach(vehicle, access, route, waypoint, horizontalDistance, dx, dz, clientSide)) {
+        boolean useLShapedRoute = route.shouldUseLShaped(referencePosition.x, referencePosition.z);
+        if (useLShapedRoute
+                && tickLShapedNavigation(vehicle, access, route, waypoint, clientSide)) {
             return;
         }
-        if (horizontalDistance <= waypointReachRadius(vehicle, route) && canAdvanceTarget(vehicle, route)) {
+        referencePosition = horizontalReferencePosition(vehicle);
+        CruiseRoute.Waypoint steeringWaypoint = route.getNavigationTarget(referencePosition.x, referencePosition.z);
+        double actualDx = waypoint.x() + 0.5 - referencePosition.x;
+        double actualDz = waypoint.z() + 0.5 - referencePosition.z;
+        double actualDistance = Math.sqrt(actualDx * actualDx + actualDz * actualDz);
+        double dx = steeringWaypoint.x() + 0.5 - referencePosition.x;
+        double dz = steeringWaypoint.z() + 0.5 - referencePosition.z;
+        double horizontalDistance = Math.sqrt(dx * dx + dz * dz);
+        boolean lLandingHandoff = !route.shouldUseLShaped(referencePosition.x, referencePosition.z)
+                || route.getLoadingStage() >= CruiseRoute.L_STAGE_FINAL_LEG
+                && actualDistance <= CruiseRoute.L_FINAL_LANDING_HANDOFF_DISTANCE;
+        if (lLandingHandoff && tickFinalLandingApproach(vehicle, access, route, waypoint, actualDistance, actualDx, actualDz, clientSide)) {
+            return;
+        }
+        if (lLandingHandoff && actualDistance <= waypointReachRadius(vehicle, route) && canAdvanceTarget(vehicle, route)) {
             route.advance();
             if (!clientSide) {
                 CruiseModuleData.write(vehicle, route);
@@ -298,14 +506,32 @@ public final class CruiseController {
                 return;
             }
             referencePosition = horizontalReferencePosition(vehicle);
-            dx = waypoint.x() + 0.5 - referencePosition.x;
-            dz = waypoint.z() + 0.5 - referencePosition.z;
+            steeringWaypoint = route.getNavigationTarget(referencePosition.x, referencePosition.z);
+            actualDx = waypoint.x() + 0.5 - referencePosition.x;
+            actualDz = waypoint.z() + 0.5 - referencePosition.z;
+            actualDistance = Math.sqrt(actualDx * actualDx + actualDz * actualDz);
+            dx = steeringWaypoint.x() + 0.5 - referencePosition.x;
+            dz = steeringWaypoint.z() + 0.5 - referencePosition.z;
             horizontalDistance = Math.sqrt(dx * dx + dz * dz);
-            if (tickFinalLandingApproach(vehicle, access, route, waypoint, horizontalDistance, dx, dz, clientSide)) {
+            if (!route.shouldUseLShaped(referencePosition.x, referencePosition.z)
+                    || route.getLoadingStage() >= CruiseRoute.L_STAGE_FINAL_LEG
+                    && actualDistance <= CruiseRoute.L_FINAL_LANDING_HANDOFF_DISTANCE
+                    && tickFinalLandingApproach(vehicle, access, route, waypoint, actualDistance, actualDx, actualDz, clientSide)) {
                 return;
             }
         }
         if (tickRotorcraftHoldingApproach(vehicle, access, route, waypoint, horizontalDistance)) {
+            return;
+        }
+
+        // A long L-mode leg with a sub-chunk short axis has no corner to fly,
+        // but it still needs the endpoint chunk's long-axis center line. Keep
+        // using the L center-line controller instead of the ordinary 3-degree
+        // waypoint dead zone, which otherwise lets wind drift grow while the
+        // aircraft is already moving along the long axis.
+        if (route.isLongLRouteCandidate()
+                && !route.shouldUseLShaped(referencePosition.x, referencePosition.z)) {
+            tickDirectLLineNavigation(vehicle, access, route);
             return;
         }
 
@@ -331,7 +557,619 @@ public final class CruiseController {
         }
 
         boolean awayFromFinal = isAwayFromFinal(vehicle, route);
-        setBoosting(vehicle, access, shouldBoost(access, yawError, altitudeError, awayFromFinal));
+        setBoosting(vehicle, access, shouldBoost(vehicle, yawError, altitudeError, awayFromFinal));
+    }
+
+    /**
+     * L mode deliberately avoids the ordinary waypoint steering loop. It
+     * first captures a chunk-center line, locks the short axis, starts the
+     * corner turn at the predicted braking/rotation distance, and then holds
+     * the long axis until the final landing handoff radius.
+     */
+    private static boolean tickLShapedNavigation(VehicleEntity vehicle, CruiseVehicleAccess access,
+                                                  CruiseRoute route, CruiseRoute.Waypoint waypoint,
+                                                  boolean clientSide) {
+        Vec3 reference = horizontalReferencePosition(vehicle);
+        int stage = route.getLoadingStage();
+
+        if ((stage == CruiseRoute.L_STAGE_AXIS_ALIGN
+                || stage == CruiseRoute.L_STAGE_CENTERLINE_CAPTURE)
+                && shouldBeginLTurn(vehicle, route, reference)) {
+            logLTurnPlan(vehicle, route, waypoint, reference, stage);
+            setLStage(vehicle, route, CruiseRoute.L_STAGE_CORNER_TURN, clientSide);
+            stage = CruiseRoute.L_STAGE_CORNER_TURN;
+        }
+
+        if (stage == CruiseRoute.L_STAGE_AXIS_ALIGN) {
+            float axisError = lAxisYawError(vehicle, route, true);
+            if (Math.abs(axisError) > L_AXIS_SELECTION_YAW_LIMIT) {
+                tickLContinuousAxisAlignment(vehicle, access, route);
+                return true;
+            }
+            selectLFirstLine(vehicle, access, route, axisError, clientSide);
+            setLStage(vehicle, route, CruiseRoute.L_STAGE_CENTERLINE_CAPTURE, clientSide);
+            stage = CruiseRoute.L_STAGE_CENTERLINE_CAPTURE;
+        }
+
+        if (stage == CruiseRoute.L_STAGE_CENTERLINE_CAPTURE) {
+            CruiseRoute.Waypoint captureTarget = route.getLNavigationTarget(reference.x, reference.z);
+            float axisError = lAxisYawError(vehicle, route, true);
+            double lateralError = lLateralError(route, captureTarget, reference, true);
+            if (Math.abs(lateralError) <= L_CENTERLINE_LOCK_DISTANCE
+                    && lHeadingSettled(vehicle, axisError)) {
+                TURN_MEMORY.remove(vehicle);
+                setLStage(vehicle, route, CruiseRoute.L_STAGE_FIRST_LEG, clientSide);
+                stage = CruiseRoute.L_STAGE_FIRST_LEG;
+            } else {
+                tickLFirstLegCapture(vehicle, access, route, captureTarget, reference);
+                return true;
+            }
+        }
+
+        if (stage == CruiseRoute.L_STAGE_FIRST_LEG) {
+            reference = horizontalReferencePosition(vehicle);
+            CruiseRoute.Waypoint corner = route.getLCornerTarget();
+            float axisError = lAxisYawError(vehicle, route, true);
+            double lateralError = lLateralError(route, corner, reference, true);
+            if (Math.abs(lateralError) <= L_CENTERLINE_LOCK_DISTANCE
+                    && lHeadingSettled(vehicle, axisError)) {
+                reference = horizontalReferencePosition(vehicle);
+            } else if (Math.abs(lateralError) > L_CENTERLINE_LOCK_DISTANCE) {
+                tickLCenterlineCorrection(vehicle, access, route, true);
+                return true;
+            }
+            axisError = lAxisYawError(vehicle, route, true);
+            if (!lHeadingSettled(vehicle, axisError)) {
+                setLStage(vehicle, route, CruiseRoute.L_STAGE_CENTERLINE_CAPTURE, clientSide);
+                tickLFirstLegCapture(vehicle, access, route, corner,
+                        horizontalReferencePosition(vehicle));
+                return true;
+            }
+            double along = lAlongDistance(route, corner, reference, true);
+            LTurnEstimate turnEstimate = predictLTurn(vehicle, route);
+            if (along <= turnEstimate.alongDistance()
+                    || along <= CruiseRoute.L_SHAPED_MIN_SHORT_AXIS_DISTANCE) {
+                logLTurnPlan(vehicle, route, waypoint, reference, stage, along, turnEstimate);
+                setLStage(vehicle, route, CruiseRoute.L_STAGE_CORNER_TURN, clientSide);
+                stage = CruiseRoute.L_STAGE_CORNER_TURN;
+            } else {
+                tickLLockedLeg(vehicle, access, route, true);
+                return true;
+            }
+        }
+
+        if (stage == CruiseRoute.L_STAGE_CORNER_TURN) {
+            float axisError = lAxisYawError(vehicle, route, false);
+            float turnInput = lAxisTurnInput(vehicle, route, false);
+            if (!lHeadingSettled(vehicle, axisError)) {
+                setLTurningInputs(vehicle, access, turnInput);
+                return true;
+            }
+            setLTurningInputs(vehicle, access, 0.0f);
+            TURN_MEMORY.remove(vehicle);
+            setLStage(vehicle, route, CruiseRoute.L_STAGE_FINAL_LEG, clientSide);
+            stage = CruiseRoute.L_STAGE_FINAL_LEG;
+        }
+
+        if (stage == CruiseRoute.L_STAGE_FINAL_LEG) {
+            reference = horizontalReferencePosition(vehicle);
+            double actualDx = waypoint.x() + 0.5d - reference.x;
+            double actualDz = waypoint.z() + 0.5d - reference.z;
+            double actualDistance = Math.sqrt(actualDx * actualDx + actualDz * actualDz);
+            if (route.isFinalTarget() && actualDistance <= CruiseRoute.L_FINAL_LANDING_HANDOFF_DISTANCE) {
+                return false;
+            }
+            if (!route.isFinalTarget() && actualDistance <= waypointReachRadius(vehicle, route)
+                    && canAdvanceTarget(vehicle, route)) {
+                route.advance();
+                if (!clientSide) {
+                    CruiseModuleData.write(vehicle, route);
+                    syncRouteToClient(vehicle, route);
+                }
+                return true;
+            }
+            float axisError = lAxisYawError(vehicle, route, false);
+            CruiseRoute.Waypoint lineTarget = route.getLNavigationTarget(reference.x, reference.z);
+            double lateralError = lLateralError(route, lineTarget, reference, false);
+            if (Math.abs(lateralError) <= L_CENTERLINE_LOCK_DISTANCE
+                    && lHeadingSettled(vehicle, axisError)) {
+                reference = horizontalReferencePosition(vehicle);
+                axisError = lAxisYawError(vehicle, route, false);
+            } else if (Math.abs(lateralError) > L_CENTERLINE_LOCK_DISTANCE) {
+                tickLCenterlineCorrection(vehicle, access, route, false);
+                return true;
+            }
+            if (!lHeadingSettled(vehicle, axisError)) {
+                setLStage(vehicle, route, CruiseRoute.L_STAGE_CORNER_TURN, clientSide);
+                return true;
+            }
+            tickLLockedLeg(vehicle, access, route, false);
+            return true;
+        }
+        return true;
+    }
+
+    private static void tickLFirstLegCapture(VehicleEntity vehicle, CruiseVehicleAccess access,
+                                             CruiseRoute route, CruiseRoute.Waypoint target, Vec3 reference) {
+        float turn = lCenterlineTurnInput(vehicle, route, target, reference, true);
+        float climbInput = altitudeInput(vehicle, navigationAltitude(route) - vehicle.getY());
+        setBoosting(vehicle, access, false);
+        if (vehicle instanceof AirplaneEntity) {
+            setCruiseInputs(vehicle, turn, 0.0f, -climbInput);
+        } else {
+            setCruiseInputs(vehicle, turn, climbInput, 1.0f);
+        }
+        if (vehicle instanceof EngineVehicle engineVehicle) {
+            engineVehicle.setEngineTarget(1.0f);
+        }
+    }
+
+    /** Keeps propulsion on while the first axis is being brought below the 45 degree gate. */
+    private static void tickLContinuousAxisAlignment(VehicleEntity vehicle, CruiseVehicleAccess access,
+                                                      CruiseRoute route) {
+        float turn = lAxisTurnInput(vehicle, route, true);
+        float climbInput = altitudeInput(vehicle, navigationAltitude(route) - vehicle.getY());
+        boolean brake = !lHeadingSettled(vehicle, lAxisYawError(vehicle, route, true));
+        setBoosting(vehicle, access, false);
+        if (vehicle instanceof AirplaneEntity) {
+            setCruiseInputs(vehicle, turn, brake ? -1.0f : 0.0f, -climbInput);
+        } else {
+            setCruiseInputs(vehicle, turn, climbInput, brake ? 0.0f : 1.0f);
+        }
+        if (vehicle instanceof AirplaneEntity && vehicle instanceof EngineVehicle engineVehicle) {
+            engineVehicle.setEngineTarget(brake ? 0.0f : 1.0f);
+        }
+    }
+
+    private static void selectLFirstLine(VehicleEntity vehicle, CruiseVehicleAccess access,
+                                         CruiseRoute route, float axisError, boolean clientSide) {
+        if (route.getLFirstLineCoordinate() != null) {
+            return;
+        }
+        // At the low-angle gate the current chunk center is the test target;
+        // do not push selection into a farther line based on current speed.
+        route.setLFirstLineCoordinate(route.selectLFirstLine(vehicle.getX(), vehicle.getZ(), 0.0d));
+        if (!clientSide) {
+            CruiseModuleData.write(vehicle, route);
+            syncRouteToClient(vehicle, route);
+        }
+    }
+
+    private static double lYawSpeed(VehicleEntity vehicle) {
+        if (vehicle instanceof InventoryVehicleEntity inventoryVehicle) {
+            return Math.max(0.01d, inventoryVehicle.getProperties().get(VehicleStat.YAW_SPEED));
+        }
+        return 5.0d;
+    }
+
+    private static boolean shouldBeginLTurn(VehicleEntity vehicle, CruiseRoute route, Vec3 reference) {
+        CruiseRoute.Waypoint corner = route.getLCornerTarget();
+        if (corner == null) {
+            return false;
+        }
+        double remaining = lAlongDistance(route, corner, reference, true);
+        LTurnEstimate estimate = predictLTurn(vehicle, route);
+        return remaining <= estimate.alongDistance()
+                || remaining <= CruiseRoute.L_SHAPED_MIN_SHORT_AXIS_DISTANCE;
+    }
+
+    private static void logLTurnPlan(VehicleEntity vehicle, CruiseRoute route,
+                                     CruiseRoute.Waypoint waypoint, Vec3 reference, int stage) {
+        CruiseRoute.Waypoint corner = route.getLCornerTarget();
+        if (corner == null) {
+            return;
+        }
+        LTurnEstimate estimate = predictLTurn(vehicle, route);
+        logLTurnPlan(vehicle, route, waypoint, reference, stage,
+                lAlongDistance(route, corner, reference, true), estimate);
+    }
+
+    private static void logLTurnPlan(VehicleEntity vehicle, CruiseRoute route,
+                                     CruiseRoute.Waypoint waypoint, Vec3 reference, int stage,
+                                     double remaining, LTurnEstimate estimate) {
+        double boost = vehicle instanceof EngineVehicle engineVehicle
+                && vehicle instanceof CruiseVehicleAccess access
+                ? boostLevel(engineVehicle, access) : 0.0d;
+        CruiseDebug.debug(ImmersiveAircraftCruise.LOGGER,
+                "[CruiseLTurnPlan] vehicle={} stage={} pos={}/{} waypoint={}/{} remaining={} predictedAlong={} ticks={} predictedGate={} min16Gate={} speed={} boost={} yaw={} targetYaw={} firstAxisX={} firstSign={}",
+                vehicle.getId(), stage, reference.x, reference.z, waypoint.x(), waypoint.z(), remaining,
+                estimate.alongDistance(), estimate.ticks(), remaining <= estimate.alongDistance(),
+                remaining <= CruiseRoute.L_SHAPED_MIN_SHORT_AXIS_DISTANCE,
+                horizontalLength(vehicle.getDeltaMovement()), boost,
+                vehicle.getYRot(), lAxisYaw(route, false), route.isLFirstAxisX(), route.lFirstAxisSign());
+    }
+
+    /**
+     * Predicts how far the vehicle will continue along the first axis while
+     * turning onto the second axis. The prediction follows the native yaw
+     * equation (including the ten-step input interpolation) and the same
+     * engine-off/brake decay used by the airplane controller. It never mutates
+     * the entity; the result is used only to choose the turn entry tick.
+     */
+    private static LTurnEstimate predictLTurn(VehicleEntity vehicle, CruiseRoute route) {
+        double targetYaw = lAxisYaw(route, false);
+        double yaw = vehicle.getYRot();
+        double yawSpeed = Math.max(0.01d, lYawSpeed(vehicle));
+        double turnInput = vehicle.pressingInterpolatedX.getSmooth();
+        int turnSign = lTurnSign(Mth.wrapDegrees((float) (yaw - targetYaw)));
+        Vec3 velocity = vehicle.getDeltaMovement();
+        boolean firstAxisX = route.isLFirstAxisX();
+        int firstAxisSign = route.lFirstAxisSign();
+        double alongDistance = 0.0d;
+        int ticks = 0;
+
+        EngineVehicle engineVehicle = vehicle instanceof EngineVehicle engine ? engine : null;
+        InventoryVehicleEntity inventoryVehicle = vehicle instanceof InventoryVehicleEntity inventory
+                ? inventory : null;
+        boolean simulateAirplane = vehicle instanceof AirplaneEntity
+                && engineVehicle != null && inventoryVehicle != null;
+        double enginePower = simulateAirplane ? baseEnginePower(engineVehicle) : 0.0d;
+        double engineStep = simulateAirplane ? enginePowerStep(engineVehicle, inventoryVehicle) : 0.0d;
+        double boostLevel = simulateAirplane ? predictedCurrentBoostLevel(engineVehicle) : 0.0d;
+        double friction = simulateAirplane ? inventoryVehicle.getProperties().get(VehicleStat.FRICTION) : 0.0d;
+        double lift = simulateAirplane ? inventoryVehicle.getProperties().get(VehicleStat.LIFT) : 0.0d;
+        double horizontalDecay = simulateAirplane
+                ? inventoryVehicle.getProperties().get(VehicleStat.HORIZONTAL_DECAY) : 1.0d;
+        double verticalDecay = simulateAirplane
+                ? inventoryVehicle.getProperties().get(VehicleStat.VERTICAL_DECAY) : 1.0d;
+        double glideFactor = simulateAirplane
+                ? inventoryVehicle.getProperties().get(VehicleStat.GLIDE_FACTOR) : 0.0d;
+        double engineSpeed = simulateAirplane
+                ? inventoryVehicle.getProperties().get(VehicleStat.ENGINE_SPEED) : 0.0d;
+        double pitch = vehicle.getXRot();
+        double stabilizer = simulateAirplane
+                ? inventoryVehicle.getProperties().getAdditive(VehicleStat.STABILIZER) : 0.0d;
+        double brakeFactor = simulateAirplane ? brakingFactor(vehicle) : 1.0d;
+
+        for (int tick = 1; tick <= L_TURN_PREDICTION_MAX_TICKS; tick++) {
+            float error = Mth.wrapDegrees((float) (yaw - targetYaw));
+            boolean turnComplete = Math.abs(error) <= yawSpeed
+                    || turnSign == 0
+                    || lTurnSign(error) != turnSign;
+            double desiredInput = predictedLTurnInput(error, yawSpeed, turnSign);
+            if (simulateAirplane) {
+                double effectiveEnginePower = boostedEnginePower(engineVehicle, enginePower, boostLevel);
+                Vec3 forward = forwardFromRotation(yaw, pitch);
+                velocity = simulateAirplaneVelocityStep(vehicle, velocity, forward, effectiveEnginePower,
+                        friction, lift, horizontalDecay, verticalDecay, glideFactor);
+                velocity = velocity.scale(brakeFactor);
+                yaw -= yawSpeed * turnInput;
+                pitch *= 1.0d - stabilizer;
+                forward = forwardFromRotation(yaw, pitch);
+                velocity = velocity.add(forward.scale(effectiveEnginePower * effectiveEnginePower * engineSpeed));
+                enginePower += (0.0d - enginePower) * engineStep;
+                boostLevel = nextPredictedBoostLevel(boostLevel, 0.0d);
+            } else {
+                velocity = velocity.scale(brakingDecay(vehicle));
+                yaw -= yawSpeed * turnInput;
+            }
+
+            double signedStep = (firstAxisX ? velocity.x : velocity.z) * firstAxisSign;
+            alongDistance += signedStep;
+            turnInput += (desiredInput - turnInput) / L_NATIVE_INPUT_INTERPOLATION_STEPS;
+            ticks = tick;
+            if (turnComplete) {
+                break;
+            }
+        }
+        return new LTurnEstimate(Math.max(0.0d, alongDistance), ticks);
+    }
+
+    private static double predictedLTurnInput(float error, double yawSpeed, int turnSign) {
+        double absoluteError = Math.abs(error);
+        if (absoluteError <= yawSpeed || turnSign == 0 || lTurnSign(error) != turnSign) {
+            return 0.0d;
+        }
+        return absoluteError <= yawSpeed * L_FINE_TURN_YAW_MULTIPLIER
+                ? turnSign * L_FINE_TURN_INPUT : turnSign;
+    }
+
+    private static void tickLLockedLeg(VehicleEntity vehicle, CruiseVehicleAccess access,
+                                        CruiseRoute route, boolean firstAxis) {
+        float axisError = lAxisYawError(vehicle, route, firstAxis);
+        float climbInput = altitudeInput(vehicle, navigationAltitude(route) - vehicle.getY());
+        Vec3 reference = horizontalReferencePosition(vehicle);
+        CruiseRoute.Waypoint lineTarget = route.getLNavigationTarget(reference.x, reference.z);
+        float turn = lCenterlineTurnInput(vehicle, route, lineTarget, reference, firstAxis);
+        LAlignmentPlan plan = L_ALIGNMENT_PLANS.get(vehicle);
+        boolean dampingActive = plan != null
+                && plan.stage() == route.getLoadingStage()
+                && plan.firstAxis() == firstAxis
+                && !plan.axisOnly();
+        boolean settled = lHeadingSettled(vehicle, axisError) && !dampingActive;
+        setBoosting(vehicle, access, settled && shouldBoost(vehicle, 0.0f,
+                navigationAltitude(route) - vehicle.getY(), isAwayFromFinal(vehicle, route)));
+        if (vehicle instanceof AirplaneEntity) {
+            setCruiseInputs(vehicle, turn, 0.0f, -climbInput);
+        } else {
+            setCruiseInputs(vehicle, turn, climbInput, 1.0f);
+        }
+        if (vehicle instanceof EngineVehicle engineVehicle) {
+            engineVehicle.setEngineTarget(1.0f);
+        }
+    }
+
+    private static void tickLCenterlineCorrection(VehicleEntity vehicle, CruiseVehicleAccess access,
+                                                   CruiseRoute route, boolean firstAxis) {
+        Vec3 reference = horizontalReferencePosition(vehicle);
+        CruiseRoute.Waypoint lineTarget = route.getLNavigationTarget(reference.x, reference.z);
+        float turn = lCenterlineTurnInput(vehicle, route, lineTarget, reference, firstAxis);
+        float climbInput = altitudeInput(vehicle, navigationAltitude(route) - vehicle.getY());
+        boolean axisHeadingCorrection = lAxisHeadingCorrectionActive(vehicle, route, firstAxis);
+        setBoosting(vehicle, access, false);
+        if (vehicle instanceof AirplaneEntity) {
+            setCruiseInputs(vehicle, turn, 0.0f, -climbInput);
+        } else {
+            setCruiseInputs(vehicle, turn, climbInput, axisHeadingCorrection ? 0.0f : 1.0f);
+        }
+        if (vehicle instanceof AirplaneEntity && vehicle instanceof EngineVehicle engineVehicle) {
+            engineVehicle.setEngineTarget(axisHeadingCorrection ? 0.0f : 1.0f);
+        }
+    }
+
+    private static void tickDirectLLineNavigation(VehicleEntity vehicle, CruiseVehicleAccess access,
+                                                   CruiseRoute route) {
+        Vec3 reference = horizontalReferencePosition(vehicle);
+        CruiseRoute.Waypoint lineTarget = route.getLFinalLineTarget();
+        float turn = lCenterlineTurnInput(vehicle, route, lineTarget, reference, false);
+        float climbInput = altitudeInput(vehicle, navigationAltitude(route) - vehicle.getY());
+        float axisError = lAxisYawError(vehicle, route, false);
+        LAlignmentPlan plan = L_ALIGNMENT_PLANS.get(vehicle);
+        boolean dampingActive = plan != null
+                && plan.stage() == route.getLoadingStage()
+                && !plan.firstAxis()
+                && !plan.axisOnly();
+        boolean settled = lHeadingSettled(vehicle, axisError) && !dampingActive;
+        setBoosting(vehicle, access, settled && shouldBoost(vehicle, 0.0f,
+                navigationAltitude(route) - vehicle.getY(), isAwayFromFinal(vehicle, route)));
+        if (vehicle instanceof AirplaneEntity) {
+            setCruiseInputs(vehicle, turn, 0.0f, -climbInput);
+        } else {
+            setCruiseInputs(vehicle, turn, climbInput, 1.0f);
+        }
+        if (vehicle instanceof EngineVehicle engineVehicle) {
+            engineVehicle.setEngineTarget(1.0f);
+        }
+    }
+
+    private static LAlignmentPlan getLAlignmentPlan(VehicleEntity vehicle, CruiseRoute route,
+                                                     CruiseRoute.Waypoint lineTarget, Vec3 reference,
+                                                     boolean firstAxis) {
+        int stage = route.getLoadingStage();
+        boolean xAxis = route.isLFirstAxisX() == firstAxis;
+        int sign = firstAxis ? route.lFirstAxisSign() : route.lSecondAxisSign();
+        double currentAlong = xAxis ? reference.x : reference.z;
+        double speed = horizontalLength(vehicle.getDeltaMovement());
+        double lateralError = lLateralError(route, lineTarget, reference, firstAxis);
+        double predictedLateralError = lateralError
+                - lLateralVelocity(vehicle, route, firstAxis) * L_CENTERLINE_DAMPING_HORIZON_TICKS;
+        double lateralCorrection = predictedLateralError;
+        double lookahead = Math.max(L_CENTERLINE_LOOKAHEAD,
+                Math.max(Math.abs(lateralError), speed * L_CENTERLINE_LOOKAHEAD_TICKS));
+        double predictedAlong = currentAlong + sign * lookahead;
+        double targetLateral = (xAxis ? reference.z : reference.x) + lateralCorrection;
+        double predictedX = xAxis ? predictedAlong : targetLateral;
+        double predictedZ = xAxis ? targetLateral : predictedAlong;
+        float targetYaw = (float) (Mth.atan2(-(predictedX - reference.x), predictedZ - reference.z)
+                * 180.0d / Math.PI);
+        return new LAlignmentPlan(stage, firstAxis, targetYaw, false, lateralError);
+    }
+
+    private static float lCenterlineTurnInput(VehicleEntity vehicle, CruiseRoute route,
+                                              CruiseRoute.Waypoint lineTarget, Vec3 reference,
+                                              boolean firstAxis) {
+        float axisYaw = lAxisYaw(route, firstAxis);
+        if (lineTarget == null) {
+            return lFullTurnInput(vehicle, axisYaw);
+        }
+        double lateralError = lLateralError(route, lineTarget, reference, firstAxis);
+        double lateralVelocity = lLateralVelocity(vehicle, route, firstAxis);
+        double predictedLateralError = lateralError
+                - lateralVelocity * L_CENTERLINE_DAMPING_HORIZON_TICKS;
+        if (Math.abs(lateralError) <= L_CENTERLINE_LOCK_DISTANCE
+                && Math.abs(predictedLateralError) <= L_CENTERLINE_HOLD_PREDICTED_ERROR
+                && Math.abs(lateralVelocity) <= L_CENTERLINE_HOLD_LATERAL_SPEED
+                && Math.abs(vehicle.pressingInterpolatedX.getSmooth()) <= L_CENTERLINE_HOLD_TURN_RATE) {
+            return lAxisHoldInput(vehicle, route, firstAxis);
+        }
+        LAlignmentPlan correction = getLAlignmentPlan(vehicle, route, lineTarget, reference, firstAxis);
+        L_ALIGNMENT_PLANS.put(vehicle, correction);
+        return lContinuousTurnInput(vehicle, correction.targetYaw());
+    }
+
+    private static float lAxisHoldInput(VehicleEntity vehicle, CruiseRoute route,
+                                        boolean firstAxis) {
+        float axisYaw = lAxisYaw(route, firstAxis);
+        LAlignmentPlan plan = L_ALIGNMENT_PLANS.get(vehicle);
+        if (plan == null || plan.stage() != route.getLoadingStage()
+                || plan.firstAxis() != firstAxis || !plan.axisOnly()) {
+            L_ALIGNMENT_PLANS.put(vehicle,
+                    new LAlignmentPlan(route.getLoadingStage(), firstAxis, axisYaw, true, 0.0d));
+            L_TURN_STATES.remove(vehicle);
+        }
+        return lFullTurnInput(vehicle, axisYaw);
+    }
+
+    private static float lFullTurnInput(VehicleEntity vehicle, float targetYaw) {
+        float error = Mth.wrapDegrees(vehicle.getYRot() - targetYaw);
+        float smoothInput = vehicle.pressingInterpolatedX.getSmooth();
+        LTurnState state = L_TURN_STATES.get(vehicle);
+        if (state == null || Math.abs(Mth.wrapDegrees(state.targetYaw() - targetYaw)) > 0.5f) {
+            int sign = lTurnSign(error);
+            state = new LTurnState(targetYaw, sign, sign == 0 ? L_TURN_HOLD : L_TURN_APPROACH);
+            L_TURN_STATES.put(vehicle, state);
+        }
+        float yawSpeed = (float) lYawSpeed(vehicle);
+        float fineTurnLimit = yawSpeed * L_FINE_TURN_YAW_MULTIPLIER;
+        if (Math.abs(error) <= yawSpeed) {
+            L_TURN_STATES.put(vehicle, new LTurnState(targetYaw, 0, L_TURN_HOLD));
+            L_PENDING_HEADING_SNAPS.put(vehicle, targetYaw);
+            return traceLTurnResult(vehicle, targetYaw, error, smoothInput, 0.0f, "snap");
+        }
+        if (state.phase() == L_TURN_HOLD) {
+            int sign = lTurnSign(error);
+            state = new LTurnState(targetYaw, sign, sign == 0 ? L_TURN_HOLD : L_TURN_APPROACH);
+            L_TURN_STATES.put(vehicle, state);
+        }
+        if (state.sign() == 0) {
+            L_PENDING_HEADING_SNAPS.put(vehicle, targetYaw);
+            return traceLTurnResult(vehicle, targetYaw, error, smoothInput, 0.0f, "snap-zero");
+        }
+        if (lTurnSign(error) != state.sign()) {
+            L_TURN_STATES.put(vehicle, new LTurnState(targetYaw, 0, L_TURN_HOLD));
+            L_PENDING_HEADING_SNAPS.put(vehicle, targetYaw);
+            return traceLTurnResult(vehicle, targetYaw, error, smoothInput, 0.0f, "snap-crossed");
+        }
+        float input = Math.abs(error) <= fineTurnLimit
+                ? state.sign() * L_FINE_TURN_INPUT
+                : state.sign();
+        return traceLTurnResult(vehicle, targetYaw, error, smoothInput, input,
+                Math.abs(error) <= fineTurnLimit ? "fine" : "approach");
+    }
+
+    /**
+     * Steers toward a moving centerline target without snapping the aircraft's
+     * heading. The native input interpolation then supplies the remaining
+     * smoothing while the target is recomputed from position and velocity.
+     */
+    private static float lContinuousTurnInput(VehicleEntity vehicle, float targetYaw) {
+        float error = Mth.wrapDegrees(vehicle.getYRot() - targetYaw);
+        float yawSpeed = (float) lYawSpeed(vehicle);
+        float smoothInput = vehicle.pressingInterpolatedX.getSmooth();
+        int sign = lTurnSign(error);
+        L_TURN_STATES.put(vehicle, new LTurnState(targetYaw, sign,
+                sign == 0 ? L_TURN_HOLD : L_TURN_APPROACH));
+        float proportionalInput = Mth.clamp(
+                error / (yawSpeed * L_FINE_TURN_YAW_MULTIPLIER), -1.0f, 1.0f);
+        float input = Mth.clamp(proportionalInput
+                - smoothInput * L_CONTINUOUS_TURN_RATE_DAMPING, -1.0f, 1.0f);
+        boolean brakingResidual = lTurnSign(input) != 0 && lTurnSign(input) != sign;
+        return traceLTurnResult(vehicle, targetYaw, error, smoothInput, input,
+                brakingResidual ? "continuous-brake" : "continuous-damped");
+    }
+
+    private static int lTurnSign(float error) {
+        return error == 0.0f ? 0 : (error < 0.0f ? -1 : 1);
+    }
+
+    private static float traceLTurnResult(VehicleEntity vehicle, float targetYaw, float error,
+                                          float smoothInput, float turnInput, String reason) {
+        if (!CruiseDebug.enabled()) {
+            return turnInput;
+        }
+        LTurnState state = L_TURN_STATES.get(vehicle);
+        int phase = state == null ? -1 : state.phase();
+        int sign = state == null ? 0 : state.sign();
+        LTurnDebugState previous = L_TURN_DEBUG_STATES.get(vehicle);
+        int ticksSinceSample = previous == null ? 0 : previous.ticksSinceSample() + 1;
+        boolean stateChanged = previous == null
+                || previous.phase() != phase
+                || previous.sign() != sign
+                || Math.abs(Mth.wrapDegrees(previous.targetYaw() - targetYaw)) > 0.5f;
+        if (stateChanged || ticksSinceSample >= L_TURN_DEBUG_SAMPLE_INTERVAL) {
+            Vec3 velocity = vehicle.getDeltaMovement();
+            ImmersiveAircraftCruise.LOGGER.debug(
+                    "[CruiseLTurn] vehicle={} reason={} phase={} sign={} input={} yaw={} targetYaw={} error={} smoothInput={} yawSpeed={} pos={}/{}/{} velocity={}/{}/{}",
+                    vehicle.getId(), reason, phase, sign, turnInput, vehicle.getYRot(), targetYaw, error,
+                    smoothInput, lYawSpeed(vehicle), vehicle.getX(), vehicle.getY(), vehicle.getZ(),
+                    velocity.x, velocity.y, velocity.z);
+            ticksSinceSample = 0;
+        }
+        if (state == null) {
+            L_TURN_DEBUG_STATES.remove(vehicle);
+        } else {
+            L_TURN_DEBUG_STATES.put(vehicle,
+                    new LTurnDebugState(targetYaw, phase, sign, ticksSinceSample));
+        }
+        return turnInput;
+    }
+
+    private static void setLTurningInputs(VehicleEntity vehicle, CruiseVehicleAccess access, float turn) {
+        setBoosting(vehicle, access, false);
+        if (vehicle instanceof AirplaneEntity) {
+            setCruiseInputs(vehicle, turn, -1.0f, 0.0f);
+            if (vehicle instanceof EngineVehicle engineVehicle) {
+                engineVehicle.setEngineTarget(0.0f);
+            }
+        } else {
+            setCruiseInputs(vehicle, turn, 0.0f, 0.0f);
+        }
+    }
+
+    private static void setLStage(VehicleEntity vehicle, CruiseRoute route, int stage, boolean clientSide) {
+        if (route.getLoadingStage() == stage) {
+            return;
+        }
+        L_ALIGNMENT_PLANS.remove(vehicle);
+        L_TURN_STATES.remove(vehicle);
+        L_PENDING_HEADING_SNAPS.remove(vehicle);
+        route.setLoadingStage(stage);
+        if (!clientSide) {
+            CruiseModuleData.write(vehicle, route);
+            syncRouteToClient(vehicle, route);
+        }
+    }
+
+    private static float lAxisYawError(VehicleEntity vehicle, CruiseRoute route, boolean firstAxis) {
+        int sign = firstAxis ? route.lFirstAxisSign() : route.lSecondAxisSign();
+        double dx = firstAxis && route.isLFirstAxisX() || !firstAxis && !route.isLFirstAxisX() ? sign : 0.0d;
+        double dz = dx == 0.0d ? sign : 0.0d;
+        return yawError(vehicle.getYRot(), dx, dz);
+    }
+
+    private static float lAxisYaw(CruiseRoute route, boolean firstAxis) {
+        int sign = firstAxis ? route.lFirstAxisSign() : route.lSecondAxisSign();
+        double dx = firstAxis && route.isLFirstAxisX() || !firstAxis && !route.isLFirstAxisX() ? sign : 0.0d;
+        double dz = dx == 0.0d ? sign : 0.0d;
+        return (float) (Mth.atan2(-dx, dz) * 180.0d / Math.PI);
+    }
+
+    private static double lLateralError(CruiseRoute route, CruiseRoute.Waypoint lineTarget,
+                                        Vec3 reference, boolean firstAxis) {
+        if (lineTarget == null) {
+            return Double.MAX_VALUE;
+        }
+        return route.isLFirstAxisX() == firstAxis
+                ? lineTarget.z() - reference.z
+                : lineTarget.x() - reference.x;
+    }
+
+    private static double lLateralVelocity(VehicleEntity vehicle, CruiseRoute route, boolean firstAxis) {
+        Vec3 velocity = vehicle.getDeltaMovement();
+        return route.isLFirstAxisX() == firstAxis ? velocity.z : velocity.x;
+    }
+
+    private static double lAlongDistance(CruiseRoute route, CruiseRoute.Waypoint target,
+                                         Vec3 reference, boolean firstAxis) {
+        if (target == null) {
+            return 0.0d;
+        }
+        int sign = firstAxis ? route.lFirstAxisSign() : route.lSecondAxisSign();
+        double delta = firstAxis && route.isLFirstAxisX() || !firstAxis && !route.isLFirstAxisX()
+                ? target.x() - reference.x
+                : target.z() - reference.z;
+        return delta * sign;
+    }
+
+    private static float lAxisTurnInput(VehicleEntity vehicle, CruiseRoute route, boolean firstAxis) {
+        return lFullTurnInput(vehicle, lAxisYaw(route, firstAxis));
+    }
+
+    private static boolean lHeadingSettled(VehicleEntity vehicle, float yawError) {
+        return Math.abs(yawError) <= lYawSpeed(vehicle);
+    }
+
+    private static boolean lAxisHeadingCorrectionActive(VehicleEntity vehicle, CruiseRoute route,
+                                                         boolean firstAxis) {
+        LAlignmentPlan plan = L_ALIGNMENT_PLANS.get(vehicle);
+        LTurnState turnState = L_TURN_STATES.get(vehicle);
+        return plan != null
+                && plan.stage() == route.getLoadingStage()
+                && plan.firstAxis() == firstAxis
+                && plan.axisOnly()
+                && (turnState == null
+                || turnState.phase() != L_TURN_HOLD
+                || !lHeadingSettled(vehicle, lAxisYawError(vehicle, route, firstAxis)));
     }
 
     public static void serverProgressTick(VehicleEntity vehicle) {
@@ -365,6 +1203,39 @@ public final class CruiseController {
         updateServerBoostingState(vehicle, access, route);
     }
 
+    public static void rememberPilot(VehicleEntity vehicle, ServerPlayer player) {
+        if (vehicle != null && player != null && isPilot(vehicle, player)
+                && CruiseModuleData.hasModule(vehicle)) {
+            LAST_PILOT.put(vehicle, player);
+        }
+    }
+
+    /**
+     * Clears a pilot's persisted navigation when the player connection goes away.
+     * The vehicle may be outside the normal tick range, so this cannot rely on a
+     * future vehicle tick to discover that its controlling passenger disappeared.
+     */
+    public static void handlePilotLoggedOut(ServerPlayer player) {
+        if (player == null) {
+            return;
+        }
+        for (Map.Entry<VehicleEntity, ServerPlayer> entry : new java.util.ArrayList<>(LAST_PILOT.entrySet())) {
+            if (entry.getValue() != player) {
+                continue;
+            }
+            VehicleEntity vehicle = entry.getKey();
+            if (vehicle instanceof CruiseVehicleAccess access && CruiseModuleData.hasModule(vehicle)) {
+                CruiseRoute route = serverRoute(vehicle, access);
+                if (route.isEnabled()) {
+                    stopNavigation(vehicle, access, route, null, false,
+                            CruiseNavigationStopReason.NORMAL);
+                }
+            }
+            LAST_PILOT.remove(vehicle);
+            LAST_DISABLED_SYNC_PILOT.remove(vehicle);
+        }
+    }
+
     public static void stopNavigationEffects(VehicleEntity vehicle) {
         if (vehicle instanceof CruiseVehicleAccess access) {
             stopNavigationEffects(vehicle, access);
@@ -379,6 +1250,67 @@ public final class CruiseController {
             return access.iacruise$getRoute();
         }
         return serverRoute(vehicle, access);
+    }
+
+    /**
+     * Clears only runtime state derived from a route definition change. Progress
+     * and the takeoff anchor remain valid unless the caller explicitly refreshes
+     * the route.
+     */
+    public static void reconcileRouteDefinitionChange(VehicleEntity vehicle,
+                                                       CruiseRoute previous,
+                                                       CruiseRoute updated) {
+        if (previous == null || updated == null
+                || previous.getSelectedRoute() != updated.getSelectedRoute()) {
+            return;
+        }
+        CruiseRoute.RouteEntry before = previous.getSelectedEntry();
+        CruiseRoute.RouteEntry after = updated.getSelectedEntry();
+        if (!navigationDefinitionChanged(before, after)) {
+            return;
+        }
+
+        updated.setLoadingStage(CruiseRoute.L_STAGE_AXIS_ALIGN);
+        updated.setLFirstLineCoordinate(null);
+        if (before.defaultAltitude() != after.defaultAltitude()
+                && updated.getCurrentIndex() == 0) {
+            updated.setInitialAltitudeReached(false);
+        }
+        L_ALIGNMENT_PLANS.remove(vehicle);
+        L_TURN_STATES.remove(vehicle);
+        L_PENDING_HEADING_SNAPS.remove(vehicle);
+        ALTITUDE_MEMORY.remove(vehicle);
+        LANDING_ACTIVE.remove(vehicle);
+        FAST_LANDING_FINAL_BRAKE_ACTIVE.remove(vehicle);
+        POST_LANDING_BRAKE.remove(vehicle);
+        clearLandingAssistState(vehicle);
+        PRELOAD_ACCELERATION_PERMITTED.remove(vehicle);
+        LAST_SENT_ACCELERATION_PERMITTED.remove(vehicle);
+    }
+
+    private static boolean navigationDefinitionChanged(CruiseRoute.RouteEntry before,
+                                                        CruiseRoute.RouteEntry after) {
+        if (before.defaultAltitude() != after.defaultAltitude()
+                || before.cruiseMode() != after.cruiseMode()
+                || before.loadingMode() != after.loadingMode()
+                || before.landingMode() != after.landingMode()
+                || !Objects.equals(before.landingAltitude(), after.landingAltitude())) {
+            return true;
+        }
+        List<CruiseRoute.Waypoint> beforeWaypoints = before.waypoints();
+        List<CruiseRoute.Waypoint> afterWaypoints = after.waypoints();
+        if (beforeWaypoints.size() != afterWaypoints.size()) {
+            return true;
+        }
+        for (int index = 0; index < beforeWaypoints.size(); index++) {
+            CruiseRoute.Waypoint first = beforeWaypoints.get(index);
+            CruiseRoute.Waypoint second = afterWaypoints.get(index);
+            if (first.x() != second.x() || first.z() != second.z()
+                    || !Objects.equals(first.altitude(), second.altitude())) {
+                return true;
+            }
+        }
+        return false;
     }
 
     public static CruiseRoute routeForOpeningScreen(VehicleEntity vehicle, int clientSelectedRoute, int clientCurrentIndex,
@@ -501,6 +1433,10 @@ public final class CruiseController {
     }
 
     private static boolean advanceReachedWaypoints(VehicleEntity vehicle, CruiseRoute route) {
+        if (route.isLShapedSingleMode() && route.getLoadingStage() < CruiseRoute.L_STAGE_FINAL_LEG
+                && route.shouldUseLShaped(vehicle.getX(), vehicle.getZ())) {
+            return false;
+        }
         boolean changed = false;
         int guard = 0;
         while (route.hasTarget() && guard++ < CruiseRoute.MAX_WAYPOINTS) {
@@ -878,20 +1814,6 @@ public final class CruiseController {
         return 0.0f;
     }
 
-    private static void tickCirclingDescent(VehicleEntity vehicle, CruiseRoute route, double altitudeError) {
-        float climbInput = altitudeInput(vehicle, altitudeError);
-        float turn = -1.0f;
-        if (vehicle instanceof AirplaneEntity) {
-            setCruiseInputs(vehicle, turn, -1.0f, Math.max(0.25f, -climbInput));
-        } else {
-            setCruiseInputs(vehicle, turn, climbInput, 1.0f);
-            vehicle.setYRot(vehicle.getYRot() - turn * 1.5f);
-        }
-        if (vehicle instanceof EngineVehicle engineVehicle) {
-            engineVehicle.setEngineTarget(Math.max(0.35f, engineVehicle.getEngineTarget() - 0.04f));
-        }
-    }
-
     private static void brakeForLanding(VehicleEntity vehicle, double horizontalDistance) {
         if (vehicle instanceof AirplaneEntity) {
             return;
@@ -1010,7 +1932,8 @@ public final class CruiseController {
         double descent = Math.max(0.0d, -altitudeError);
         double descentTicks = rotorcraftActiveDescentTicks(vehicle, descent);
         double descentTravelTicks = Math.max(0.0d, descentTicks - ROTORCRAFT_FAST_LANDING_BRAKE_RESERVE_TICKS);
-        double descentDistance = simulatedRotorcraftForwardDistance(vehicle, descentTravelTicks, 1.0f);
+        double descentDistance = simulatedRotorcraftForwardDistance(vehicle, descentTravelTicks,
+                effectiveAccelerationTarget(vehicle, 1.0f));
         double stopDistance = rotorcraftStoppingDistance(vehicle);
         boolean descend = descent > FAST_LANDING_COMPLETION_ALTITUDE_RADIUS
                 && horizontalDistance <= descentDistance + ROTORCRAFT_FAST_LANDING_BRAKE_BUFFER;
@@ -1054,6 +1977,7 @@ public final class CruiseController {
                     * Mth.clamp(inventoryVehicle.getProperties().get(VehicleStat.HORIZONTAL_DECAY), 0.0d, 1.0d);
         }
         double boostLevel = predictedRotorcraftBoostLevel(vehicle);
+        double maxSpeed = CruiseConfig.rotorcraftSpeedLimit() / 20.0d;
         double distance = 0.0d;
         for (int tick = 0; tick < tickLimit; tick++) {
             double stepRatio = Math.min(1.0d, ticks - tick);
@@ -1064,6 +1988,12 @@ public final class CruiseController {
             double thrust = Math.pow(enginePower, 5.0d) * engineSpeed;
             Vec3 thrustVelocity = forward.scale(thrust);
             velocity = velocity.add(thrustVelocity.scale(controlledThrustMultiplier(vehicle, boostLevel)));
+            if (maxSpeed > 0.0d) {
+                double horizontalSpeed = horizontalLength(velocity);
+                if (horizontalSpeed > maxSpeed) {
+                    velocity = velocity.scale(maxSpeed / horizontalSpeed);
+                }
+            }
             double stepDistance = horizontalLength(velocity);
             distance += stepDistance * stepRatio;
             boostLevel = nextPredictedBoostLevel(boostLevel, targetBoostLevel);
@@ -1334,9 +2264,11 @@ public final class CruiseController {
         StopEstimate stopEstimate = stoppingEstimate(vehicle, rawDescent);
         double activeDescent = descent;
         double availableDescentDistance = Math.max(0.0d, horizontalDistance - horizontalRadius);
-        float boostTarget = 1.0f;
+        boolean accelerationPermitted = accelerationPermit(vehicle);
+        boolean positivePowerMode = cruiseMode(vehicle).powerBonus() > 0.0f;
+        float boostTarget = positivePowerMode && !accelerationPermitted ? 0.0f : 1.0f;
         DescentEstimate descentEstimate = descentEstimate(vehicle, activeDescent, boostTarget);
-        if (cruiseMode(vehicle).powerBonus() > 0.0f) {
+        if (positivePowerMode && accelerationPermitted) {
             for (int iteration = 0; iteration < 3; iteration++) {
                 boostTarget = fastLandingBoostTarget(availableDescentDistance, currentSpeed, activeDescent, descentEstimate.ticks());
                 descentEstimate = descentEstimate(vehicle, activeDescent, boostTarget);
@@ -2119,16 +3051,84 @@ public final class CruiseController {
         return false;
     }
 
-    private static boolean shouldBoost(CruiseVehicleAccess access, float yawError, double altitudeError, boolean awayFromFinal) {
+    private static boolean shouldBoost(VehicleEntity vehicle, float yawError,
+                                       double altitudeError, boolean awayFromFinal) {
         if (!awayFromFinal) {
             return false;
         }
         float yaw = Math.abs(yawError);
         double altitude = Math.abs(altitudeError);
-        if (access.iacruise$isBoosting()) {
+        CruiseVehicleAccess access = (CruiseVehicleAccess) vehicle;
+        if (BOOST_REQUESTED.getOrDefault(vehicle, access.iacruise$isBoosting())) {
             return yaw <= BOOST_EXIT_YAW && altitude <= BOOST_EXIT_ALTITUDE;
         }
         return yaw <= BOOST_ENTER_YAW && altitude <= BOOST_ENTER_ALTITUDE;
+    }
+
+    private static boolean preloadAccelerationGateApplies(CruiseRoute route) {
+        return route.isEnabled()
+                && route.getSelectedEntry().loadingMode() != CruiseRoute.RouteLoadingMode.VANILLA
+                && route.getCruiseMode().powerBonus() > 0.0f;
+    }
+
+    private static boolean accelerationPermit(VehicleEntity vehicle) {
+        if (!(vehicle instanceof CruiseVehicleAccess access)) {
+            return true;
+        }
+        CruiseRoute route = access.iacruise$getRoute();
+        return route == null || !preloadAccelerationGateApplies(route)
+                || Boolean.TRUE.equals(PRELOAD_ACCELERATION_PERMITTED.get(vehicle));
+    }
+
+    private static float effectiveAccelerationTarget(VehicleEntity vehicle, float requestedTarget) {
+        return cruiseMode(vehicle).powerBonus() > 0.0f && !accelerationPermit(vehicle)
+                ? 0.0f : requestedTarget;
+    }
+
+    static void updatePreloadAccelerationPermit(VehicleEntity vehicle, ServerPlayer pilot,
+                                                CruiseRoute route) {
+        if (vehicle.level().isClientSide()) {
+            return;
+        }
+        boolean permitted = !preloadAutoDeceleration
+                || !preloadAccelerationGateApplies(route)
+                || CruiseChunkSendScheduler.isAccelerationReady(vehicle, route);
+        PRELOAD_ACCELERATION_PERMITTED.put(vehicle, permitted);
+        if (pilot == null) {
+            LAST_SENT_ACCELERATION_PERMITTED.remove(vehicle);
+            return;
+        }
+        Boolean previous = LAST_SENT_ACCELERATION_PERMITTED.put(vehicle, permitted);
+        if (previous == null || previous != permitted) {
+            CruiseNetwork.sendToPlayer(pilot,
+                    new UpdateCruiseAccelerationPermitPacket(vehicle.getId(), permitted));
+            CruiseDebug.debug(ImmersiveAircraftCruise.LOGGER,
+                    "[CruiseChunks] acceleration permit changed: vehicleId={}, pilot={}, permitted={}, tick={}",
+                    vehicle.getId(), pilot.getScoreboardName(), permitted, vehicle.tickCount);
+        }
+    }
+
+    static void synchronizePreloadAccelerationPermit(VehicleEntity vehicle, ServerPlayer pilot) {
+        CruiseVehicleAccess access = (CruiseVehicleAccess) vehicle;
+        CruiseRoute route = serverRoute(vehicle, access);
+        boolean permitted = !preloadAccelerationGateApplies(route)
+                || CruiseChunkSendScheduler.isAccelerationReady(vehicle, route);
+        PRELOAD_ACCELERATION_PERMITTED.put(vehicle, permitted);
+        LAST_SENT_ACCELERATION_PERMITTED.put(vehicle, permitted);
+        CruiseNetwork.sendToPlayer(pilot,
+                new UpdateCruiseAccelerationPermitPacket(vehicle.getId(), permitted));
+        CruiseDebug.debug(ImmersiveAircraftCruise.LOGGER,
+                "[CruiseChunks] acceleration permit synchronized: vehicleId={}, pilot={}, permitted={}, tick={}",
+                vehicle.getId(), pilot.getScoreboardName(), permitted, vehicle.tickCount);
+    }
+
+    public static void updatePreloadAccelerationPermit(VehicleEntity vehicle) {
+        CruiseVehicleAccess access = (CruiseVehicleAccess) vehicle;
+        updatePreloadAccelerationPermit(vehicle, controllingServerPlayer(vehicle), serverRoute(vehicle, access));
+    }
+
+    public static void updateClientAccelerationPermit(VehicleEntity vehicle, boolean permitted) {
+        PRELOAD_ACCELERATION_PERMITTED.put(vehicle, permitted);
     }
 
     private static void updateServerBoostingState(VehicleEntity vehicle, CruiseVehicleAccess access, CruiseRoute route) {
@@ -2140,8 +3140,11 @@ public final class CruiseController {
             return;
         }
         if (vehicle instanceof EngineVehicle engineVehicle) {
-            float target = access.iacruise$isBoosting() ? BOOST_TARGET_LEVEL.getOrDefault(engineVehicle, 1.0f) : 0.0f;
-            updateBoostLevel(engineVehicle, target, access.iacruise$isBoosting());
+            boolean requested = BOOST_REQUESTED.getOrDefault(vehicle, access.iacruise$isBoosting());
+            float target = requested ? BOOST_TARGET_LEVEL.getOrDefault(engineVehicle, 1.0f) : 0.0f;
+            boolean effective = requested && accelerationPermit(vehicle);
+            access.iacruise$setBoosting(effective);
+            updateBoostLevel(engineVehicle, effective ? target : 0.0f, effective);
         }
     }
 
@@ -2170,10 +3173,33 @@ public final class CruiseController {
     }
 
     private static void setCruiseInputs(VehicleEntity vehicle, float movementX, float movementY, float movementZ) {
+        if (shouldApplyPreloadAccelerationBrake(vehicle)) {
+            movementY = -1.0f;
+            movementZ = 0.0f;
+        }
         if (movementY < -0.01f) {
             AUTO_BRAKE_INPUT.put(vehicle, true);
         }
         vehicle.setInputs(movementX, movementY, movementZ);
+    }
+
+    /**
+     * A failed preload permit removes only the extra acceleration request; the
+     * aircraft still needs a native brake input so it does not coast into the
+     * first unloaded route slice. The original boost request remains intact and
+     * is restored automatically once the ten-slice permit is acknowledged.
+     */
+    private static boolean shouldApplyPreloadAccelerationBrake(VehicleEntity vehicle) {
+        if (!(vehicle instanceof AirplaneEntity)
+                || !BOOST_REQUESTED.getOrDefault(vehicle, false)
+                || accelerationPermit(vehicle)) {
+            return false;
+        }
+        if (!(vehicle instanceof CruiseVehicleAccess access)) {
+            return false;
+        }
+        CruiseRoute route = access.iacruise$getRoute();
+        return route != null && preloadAccelerationGateApplies(route);
     }
 
     public static void clearCruiseInputs(VehicleEntity vehicle) {
@@ -2186,20 +3212,26 @@ public final class CruiseController {
     }
 
     private static void setBoosting(VehicleEntity vehicle, CruiseVehicleAccess access, boolean boosting, float targetBoostLevel) {
-        access.iacruise$setBoosting(boosting);
+        BOOST_REQUESTED.put(vehicle, boosting);
+        boolean effective = boosting;
         if (vehicle instanceof EngineVehicle engineVehicle) {
-            float target = boosting ? targetBoostLevel : 0.0f;
+            float target = boosting ? Mth.clamp(targetBoostLevel, 0.0f, 1.0f) : 0.0f;
             if (boosting) {
-                BOOST_TARGET_LEVEL.put(engineVehicle, Mth.clamp(target, 0.0f, 1.0f));
+                BOOST_TARGET_LEVEL.put(engineVehicle, target);
             } else {
                 BOOST_TARGET_LEVEL.remove(engineVehicle);
             }
-            updateBoostLevel(engineVehicle, target, boosting);
+            effective = boosting && accelerationPermit(vehicle);
+            access.iacruise$setBoosting(effective);
+            updateBoostLevel(engineVehicle, effective ? target : 0.0f, effective);
+        } else {
+            access.iacruise$setBoosting(boosting);
         }
         syncLocalPilotBoostingState(vehicle, boosting, targetBoostLevel);
     }
 
     private static void stopBoostingImmediately(VehicleEntity vehicle, CruiseVehicleAccess access) {
+        BOOST_REQUESTED.put(vehicle, false);
         access.iacruise$setBoosting(false);
         if (vehicle instanceof EngineVehicle engineVehicle) {
             BOOST_LEVEL.remove(engineVehicle);
@@ -2209,6 +3241,9 @@ public final class CruiseController {
     }
 
     private static void stopNavigationEffects(VehicleEntity vehicle, CruiseVehicleAccess access) {
+        BOOST_REQUESTED.remove(vehicle);
+        PRELOAD_ACCELERATION_PERMITTED.remove(vehicle);
+        LAST_SENT_ACCELERATION_PERMITTED.remove(vehicle);
         access.iacruise$setBoosting(false);
         if (vehicle instanceof EngineVehicle engineVehicle) {
             BOOST_LEVEL.remove(engineVehicle);
@@ -2216,6 +3251,8 @@ public final class CruiseController {
         }
         LAST_PILOT.remove(vehicle);
         TURN_MEMORY.remove(vehicle);
+        L_ALIGNMENT_PLANS.remove(vehicle);
+        L_TURN_STATES.remove(vehicle);
         ALTITUDE_MEMORY.remove(vehicle);
         LANDING_ACTIVE.remove(vehicle);
         FAST_LANDING_FINAL_BRAKE_ACTIVE.remove(vehicle);
@@ -2242,7 +3279,7 @@ public final class CruiseController {
             return;
         }
         LAST_CLIENT_BOOST_SYNC.put(vehicle, new BoostSyncState(boosting, levelStep, vehicle.tickCount));
-        CruiseNetwork.sendToServer(new UpdateCruiseBoostPacket(vehicle.getId(), boosting, boostLevelFromStep(levelStep)));
+            CruiseNetwork.sendToServer(new UpdateCruiseBoostPacket(vehicle.getId(), boosting, boostLevelFromStep(levelStep)));
     }
 
     private static int boostSyncLevelStep(boolean boosting, float targetBoostLevel) {
@@ -2276,6 +3313,14 @@ public final class CruiseController {
         setBoosting(vehicle, access, active, active ? boostLevel : 0.0f);
     }
 
+    public static void updatePilotSpeed(VehicleEntity vehicle, float speed) {
+        if (vehicle.level().isClientSide()) {
+            return;
+        }
+        PILOT_SPEEDS.put(vehicle, new PilotSpeedSample(Mth.clamp(speed, 0.0f, PILOT_SPEED_MAX),
+                vehicle.level().getServer().getTickCount()));
+    }
+
     private static void stopNavigation(VehicleEntity vehicle, CruiseVehicleAccess access, CruiseRoute route,
                                        ServerPlayer messagePlayer, boolean clientSide) {
         stopNavigation(vehicle, access, route, messagePlayer, clientSide, CruiseNavigationStopReason.NORMAL);
@@ -2285,6 +3330,7 @@ public final class CruiseController {
                                        ServerPlayer messagePlayer, boolean clientSide,
                                        CruiseNavigationStopReason reason) {
         route.stopNavigation();
+        L_PENDING_HEADING_SNAPS.remove(vehicle);
         stopNavigationEffects(vehicle, access);
         clearCruiseInputs(vehicle);
         CruiseNavigationStopReason effectiveReason = reason == null ? CruiseNavigationStopReason.NORMAL : reason;
@@ -2294,7 +3340,8 @@ public final class CruiseController {
             syncRouteToClient(vehicle, route);
             if (messagePlayer != null) {
                 if (!vehicle.getPassengers().contains(messagePlayer)) {
-                    CruiseNetwork.sendToPlayer(messagePlayer, new UpdateCruiseRoutePacket(vehicle.getId(), route.copy()));
+                    CruiseNetwork.sendToPlayer(messagePlayer,
+                            new UpdateCruiseRoutePacket(vehicle.getId(), route.copy()));
                 }
                 messagePlayer.displayClientMessage(Component.translatable(effectiveReason.messageKey()), true);
             }
@@ -2339,6 +3386,10 @@ public final class CruiseController {
     }
 
     public static void beforeUpdateController(VehicleEntity vehicle) {
+        if (vehicle.level().isClientSide() && !isLocalClientPilot(vehicle)) {
+            CONTROLLER_VELOCITY_BEFORE.remove(vehicle);
+            return;
+        }
         if (!(vehicle instanceof EngineVehicle engineVehicle) || !usesControlledBoost(engineVehicle)) {
             CONTROLLER_VELOCITY_BEFORE.remove(vehicle);
             return;
@@ -2356,6 +3407,11 @@ public final class CruiseController {
     }
 
     public static void afterUpdateController(VehicleEntity vehicle) {
+        if (vehicle.level().isClientSide() && !isLocalClientPilot(vehicle)) {
+            CONTROLLER_VELOCITY_BEFORE.remove(vehicle);
+            return;
+        }
+        snapLHeadingAfterController(vehicle);
         clampLandingPitch(vehicle);
         if (!(vehicle instanceof EngineVehicle engineVehicle) || !usesControlledBoost(engineVehicle)) {
             CONTROLLER_VELOCITY_BEFORE.remove(vehicle);
@@ -2367,19 +3423,106 @@ public final class CruiseController {
         }
         Vec3 before = CONTROLLER_VELOCITY_BEFORE.remove(vehicle);
         if (before == null) {
+            clampRotorcraftSpeed(vehicle, access);
             return;
         }
         float level = BOOST_LEVEL.getOrDefault(engineVehicle, 0.0f);
         double powerBonus = controlledPowerBonus(vehicle, level);
         if (Math.abs(powerBonus) <= 1.0E-6d) {
+            clampRotorcraftSpeed(vehicle, access);
             return;
         }
         Vec3 after = vehicle.getDeltaMovement();
         Vec3 controllerDelta = after.subtract(before).multiply(1.0d, 0.0d, 1.0d);
-        if (controllerDelta.lengthSqr() <= 1.0E-8d) {
+        if (controllerDelta.lengthSqr() > 1.0E-8d) {
+            vehicle.setDeltaMovement(after.add(controllerDelta.scale(powerBonus)));
+        }
+        clampRotorcraftSpeed(vehicle, access);
+    }
+
+    private static void clampRotorcraftSpeed(VehicleEntity vehicle, CruiseVehicleAccess access) {
+        if (!(vehicle instanceof Rotorcraft) || !canApplyCruiseModifiers((EngineVehicle) vehicle, access)
+                || !access.iacruise$getRoute().hasTarget()) {
             return;
         }
-        vehicle.setDeltaMovement(after.add(controllerDelta.scale(powerBonus)));
+        double limitBlocksPerSecond = CruiseConfig.rotorcraftSpeedLimit();
+        if (limitBlocksPerSecond <= 0.0d) {
+            return;
+        }
+        double maxSpeed = limitBlocksPerSecond / 20.0d;
+        Vec3 velocity = vehicle.getDeltaMovement();
+        double horizontalSpeed = Math.sqrt(velocity.x * velocity.x + velocity.z * velocity.z);
+        if (horizontalSpeed <= maxSpeed || horizontalSpeed <= 1.0E-8d) {
+            return;
+        }
+        double factor = maxSpeed / horizontalSpeed;
+        vehicle.setDeltaMovement(velocity.x * factor, velocity.y, velocity.z * factor);
+    }
+
+    /**
+     * The aircraft's native controller applies the interpolated turn input
+     * after the navigation tick has chosen a command. When an L leg is
+     * already inside one native turn tick, finish the small remaining angle
+     * after that controller has run so its residual input cannot turn the
+     * craft back on the next frame.
+     */
+    private static void snapLHeadingAfterController(VehicleEntity vehicle) {
+        if (!(vehicle instanceof CruiseVehicleAccess access)) {
+            return;
+        }
+        CruiseRoute route = access.iacruise$getRoute();
+        boolean lShapedRoute = route != null && route.shouldUseLShaped(vehicle.getX(), vehicle.getZ());
+        boolean directLLine = route != null && route.isLongLRouteCandidate() && !lShapedRoute;
+        if (route == null || !route.isEnabled() || (!lShapedRoute && !directLLine)) {
+            return;
+        }
+        Float pendingHeadingSnap = L_PENDING_HEADING_SNAPS.remove(vehicle);
+        if (pendingHeadingSnap != null) {
+            float snapError = Mth.wrapDegrees(vehicle.getYRot() - pendingHeadingSnap);
+            vehicle.setYRot(vehicle.getYRot() - snapError);
+            return;
+        }
+        LAlignmentPlan plan = L_ALIGNMENT_PLANS.get(vehicle);
+        if (plan != null && plan.axisOnly() && route.getLoadingStage() == plan.stage()) {
+            float planYawError = Mth.wrapDegrees(vehicle.getYRot() - plan.targetYaw());
+            if (Math.abs(planYawError) <= lYawSpeed(vehicle)) {
+                vehicle.setYRot(vehicle.getYRot() - planYawError);
+                return;
+            }
+        }
+        int stage = route.getLoadingStage();
+        boolean firstAxis;
+        if (stage == CruiseRoute.L_STAGE_FIRST_LEG) {
+            CruiseRoute.Waypoint target = route.getLNavigationTarget(vehicle.getX(), vehicle.getZ());
+            if (target == null || Math.abs(lLateralError(route, target,
+                    horizontalReferencePosition(vehicle), true)) > L_CENTERLINE_LOCK_DISTANCE) {
+                return;
+            }
+            firstAxis = true;
+        } else if (stage == CruiseRoute.L_STAGE_CORNER_TURN) {
+            firstAxis = false;
+        } else if (stage == CruiseRoute.L_STAGE_FINAL_LEG) {
+            CruiseRoute.Waypoint target = route.getLNavigationTarget(vehicle.getX(), vehicle.getZ());
+            if (target == null || Math.abs(lLateralError(route, target,
+                    horizontalReferencePosition(vehicle), false)) > L_CENTERLINE_LOCK_DISTANCE) {
+                return;
+            }
+            firstAxis = false;
+        } else {
+            return;
+        }
+        // A dynamic oblique correction must be allowed to work through its
+        // lateral velocity; only the axis-only plan may snap to parallel.
+        plan = L_ALIGNMENT_PLANS.get(vehicle);
+        if (plan == null || !plan.axisOnly()
+                || route.getLoadingStage() != plan.stage()
+                || plan.firstAxis() != firstAxis) {
+            return;
+        }
+        float yawError = lAxisYawError(vehicle, route, firstAxis);
+        if (Math.abs(yawError) <= lYawSpeed(vehicle)) {
+            vehicle.setYRot(vehicle.getYRot() - yawError);
+        }
     }
 
     public static void clampLandingPitch(VehicleEntity vehicle) {
@@ -2434,9 +3577,35 @@ public final class CruiseController {
     public static void syncRouteToPassengers(VehicleEntity vehicle, CruiseRoute route) {
         for (Entity passenger : vehicle.getPassengers()) {
             if (passenger instanceof ServerPlayer player) {
-                CruiseNetwork.sendToPlayer(player, new UpdateCruiseRoutePacket(vehicle.getId(), route.copy()));
+                CruiseNetwork.sendToPlayer(player,
+                        new UpdateCruiseRoutePacket(vehicle.getId(), route.copy()));
             }
         }
+    }
+
+    /**
+     * Immersive Aircraft calculates upgrade-derived properties from each
+     * client's local vehicle inventory.  Refresh every onboard client when
+     * navigation starts so passengers do not need to open the native aircraft
+     * screen to make the installed upgrades take effect locally.
+     */
+    public static void syncVehicleInventoryToPassengers(VehicleEntity vehicle) {
+        for (Entity passenger : vehicle.getPassengers()) {
+            if (passenger instanceof ServerPlayer player) {
+                syncVehicleInventoryToPlayer(vehicle, player);
+            }
+        }
+    }
+
+    public static void syncVehicleInventoryToPlayer(VehicleEntity vehicle, ServerPlayer player) {
+        if (!(vehicle instanceof InventoryVehicleEntity inventoryVehicle)) {
+            return;
+        }
+        SyncVehicleInventoryPacket packet = SyncVehicleInventoryPacket.fromVehicle(inventoryVehicle);
+        CruiseNetwork.sendToPlayer(player, packet);
+        CruiseDebug.debug(ImmersiveAircraftCruise.LOGGER,
+                "[CruiseChunks] vehicle inventory sync: vehicleId={}, player={}, entries={}",
+                vehicle.getId(), player.getScoreboardName(), packet.entries().size());
     }
 
     private static void syncDisabledRouteToPilot(VehicleEntity vehicle, CruiseRoute route) {
@@ -2448,7 +3617,8 @@ public final class CruiseController {
         if (LAST_DISABLED_SYNC_PILOT.get(vehicle) == pilot) {
             return;
         }
-        CruiseNetwork.sendToPlayer(pilot, new UpdateCruiseRoutePacket(vehicle.getId(), route.copy()));
+        CruiseNetwork.sendToPlayer(pilot,
+                new UpdateCruiseRoutePacket(vehicle.getId(), route.copy()));
         LAST_DISABLED_SYNC_PILOT.put(vehicle, pilot);
     }
 
@@ -2456,10 +3626,8 @@ public final class CruiseController {
         syncRouteToPassengers(vehicle, route);
     }
 
-    private static void syncFuelInfo(VehicleEntity vehicle, EngineVehicle engineVehicle) {
-        if (vehicle.tickCount % HUD_SYNC_INTERVAL_TICKS != 0) {
-            return;
-        }
+    private static void syncFuelInfo(EngineVehicle engineVehicle) {
+        VehicleEntity vehicle = engineVehicle;
         List<SlotDescription> slots = engineVehicle.getInventoryDescription().getSlots(VehicleInventoryDescription.BOILER);
         int[] fuel = engineVehicle instanceof EngineVehicleAccessor accessor
                 ? accessor.immersive_aircraft_cruise$getFuel()
@@ -2476,15 +3644,30 @@ public final class CruiseController {
         }
         float consumption = Math.max(0.0f, engineVehicle.getFuelConsumption());
         int remainingTicks = consumption <= 0.0f ? -1 : clampTicks((storedFuel + display.pendingFuel()) / (double) consumption);
-        float speed = hudSpeed(vehicle);
+        float speed = pilotSpeed(vehicle);
         boolean boosting = engineVehicle instanceof CruiseVehicleAccess access && access.iacruise$isBoosting();
         CruiseFuelInfo fuelInfo = new CruiseFuelInfo(display.amountText(), remainingTicks, icon, speed, boosting);
         for (Entity passenger : vehicle.getPassengers()) {
             if (passenger instanceof ServerPlayer player) {
                 awardSpeedAdvancement(player, speed);
-                CruiseNetwork.sendToPlayer(player, new UpdateCruiseFuelPacket(vehicle.getId(), fuelInfo));
+                String recipientRole = vehicle.getControllingPassenger() == player ? "pilot" : "passenger";
+                CruiseDebug.info(ImmersiveAircraftCruise.LOGGER,
+                        "[CruiseFuelSync] send: serverTick={}, vehicleId={}, vehicleTick={}, recipient={}, "
+                                + "role={}, amount={}, remainingTicks={}, speed={}, boosting={}, icon={}",
+                        vehicle.level().getServer().getTickCount(), vehicle.getId(), vehicle.tickCount,
+                        player.getScoreboardName(), recipientRole, fuelInfo.amountText(),
+                        fuelInfo.remainingTicks(), fuelInfo.speed(), fuelInfo.boosting(), describeFuelIcon(icon));
+                CruiseNetwork.sendToPlayer(player,
+                        new UpdateCruiseFuelPacket(vehicle.getId(),
+                                vehicle.getX(), vehicle.getY(), vehicle.getZ(), fuelInfo));
             }
         }
+    }
+
+    private static String describeFuelIcon(ItemStack icon) {
+        return icon.isEmpty()
+                ? "empty"
+                : BuiltInRegistries.ITEM.getKey(icon.getItem()) + "x" + icon.getCount();
     }
 
     private static void awardSpeedAdvancement(ServerPlayer player, float speed) {
@@ -2497,17 +3680,13 @@ public final class CruiseController {
         }
     }
 
-    private static float hudSpeed(VehicleEntity vehicle) {
-        Vec3 position = vehicle.position();
-        SpeedSample previous = HUD_SPEED_SAMPLES.put(vehicle, new SpeedSample(position, vehicle.tickCount));
-        double sampledSpeed = 0.0d;
-        if (previous != null) {
-            int elapsedTicks = Math.max(1, vehicle.tickCount - previous.tickCount());
-            sampledSpeed = position.distanceTo(previous.position()) * 20.0d / elapsedTicks;
+    private static float pilotSpeed(VehicleEntity vehicle) {
+        PilotSpeedSample sample = PILOT_SPEEDS.get(vehicle);
+        if (sample == null
+                || vehicle.level().getServer().getTickCount() - sample.serverTick() >= PILOT_SPEED_TIMEOUT_TICKS) {
+            return 0.0f;
         }
-        double velocitySpeed = vehicle.getDeltaMovement().length() * 20.0d;
-        double speed = sampledSpeed > 0.05d ? sampledSpeed : velocitySpeed;
-        return (float) Mth.clamp(speed, 0.0d, HUD_SPEED_MAX);
+        return sample.speed();
     }
 
     private static int displayedFuelSlot(EngineVehicle engineVehicle, List<SlotDescription> slots, int[] fuel) {
@@ -2608,28 +3787,7 @@ public final class CruiseController {
         }
     }
 
-    private record SpeedSample(Vec3 position, int tickCount) {
-    }
-
     private record BoostSyncState(boolean boosting, int levelStep, int tick) {
     }
 
-    public static Vec3 targetPosition(VehicleEntity vehicle) {
-        if (!(vehicle instanceof CruiseVehicleAccess access)) {
-            return null;
-        }
-        CruiseRoute route = access.iacruise$getRoute();
-        CruiseRoute.Waypoint waypoint = route.getTarget();
-        if (waypoint == null) {
-            waypoint = route.getCurrentWaypoint();
-        }
-        if (waypoint == null) {
-            waypoint = route.getFinalTarget();
-        }
-        double altitude = route.isHoldingPattern()
-                || LANDING_ACTIVE.containsKey(vehicle)
-                ? route.getFinalAltitude()
-                : route.getTargetAltitude();
-        return waypoint == null ? null : new Vec3(waypoint.x() + 0.5, altitude, waypoint.z() + 0.5);
-    }
 }

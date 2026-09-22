@@ -1,5 +1,6 @@
 package com.g1739.immersiveaircraftcruise.cruise;
 
+
 public enum CruiseNavigationStopReason {
     NORMAL("message.immersive_aircraft_cruise.disabled"),
     FINISHED("message.immersive_aircraft_cruise.disabled_finished"),

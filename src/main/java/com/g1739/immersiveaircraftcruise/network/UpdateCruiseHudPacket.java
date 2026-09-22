@@ -1,11 +1,11 @@
 package com.g1739.immersiveaircraftcruise.network;
 
+
 import com.g1739.immersiveaircraftcruise.CruiseItems;
 import com.g1739.immersiveaircraftcruise.cruise.CruiseController;
 import com.g1739.immersiveaircraftcruise.cruise.CruiseModuleData;
 import com.g1739.immersiveaircraftcruise.cruise.CruiseRoute;
 import immersive_aircraft.entity.VehicleEntity;
-import net.minecraft.network.FriendlyByteBuf;
 import net.minecraft.network.RegistryFriendlyByteBuf;
 import net.minecraft.network.codec.StreamCodec;
 import net.minecraft.network.protocol.common.custom.CustomPacketPayload;
@@ -18,13 +18,13 @@ public record UpdateCruiseHudPacket(int entityId, RouteStorageTarget target, boo
     public static final Type<UpdateCruiseHudPacket> TYPE = CruiseNetwork.type("update_cruise_hud");
     public static final StreamCodec<RegistryFriendlyByteBuf, UpdateCruiseHudPacket> STREAM_CODEC = StreamCodec.ofMember(UpdateCruiseHudPacket::encode, UpdateCruiseHudPacket::decode);
 
-    public void encode(FriendlyByteBuf buffer) {
+    public void encode(RegistryFriendlyByteBuf buffer) {
         buffer.writeInt(entityId);
         target.write(buffer);
         buffer.writeBoolean(hudEnabled);
     }
 
-    public static UpdateCruiseHudPacket decode(FriendlyByteBuf buffer) {
+    public static UpdateCruiseHudPacket decode(RegistryFriendlyByteBuf buffer) {
         return new UpdateCruiseHudPacket(buffer.readInt(), RouteStorageTarget.read(buffer), buffer.readBoolean());
     }
 

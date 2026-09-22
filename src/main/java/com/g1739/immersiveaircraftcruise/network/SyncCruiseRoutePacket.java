@@ -1,5 +1,6 @@
 package com.g1739.immersiveaircraftcruise.network;
 
+
 import com.g1739.immersiveaircraftcruise.cruise.CruiseController;
 import com.g1739.immersiveaircraftcruise.cruise.CruiseModuleData;
 import com.g1739.immersiveaircraftcruise.cruise.CruiseRoute;
@@ -63,6 +64,8 @@ public record SyncCruiseRoutePacket(int entityId, RouteStorageTarget target, Cru
                     player.displayClientMessage(Component.translatable("message.immersive_aircraft_cruise.requires_module"), true);
                     return;
                 }
+                CruiseController.reconcileRouteDefinitionChange(
+                        vehicle, CruiseController.currentRoute(vehicle).copy(), route);
                 CruiseModuleData.write(vehicle, route);
                 if (vehicle instanceof com.g1739.immersiveaircraftcruise.cruise.CruiseVehicleAccess access) {
                     access.iacruise$setRoute(route.copy());

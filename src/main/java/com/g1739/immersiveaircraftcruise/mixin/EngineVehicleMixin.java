@@ -1,5 +1,6 @@
 package com.g1739.immersiveaircraftcruise.mixin;
 
+
 import com.g1739.immersiveaircraftcruise.cruise.CruiseController;
 import com.g1739.immersiveaircraftcruise.cruise.CruiseFuelIconAccess;
 import immersive_aircraft.entity.InventoryVehicleEntity;

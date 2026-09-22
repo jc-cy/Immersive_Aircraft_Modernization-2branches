@@ -1,31 +1,50 @@
 package com.g1739.immersiveaircraftcruise.client;
 
 import com.g1739.immersiveaircraftcruise.ImmersiveAircraftCruise;
+import com.g1739.immersiveaircraftcruise.CruiseDebug;
 import com.g1739.immersiveaircraftcruise.cruise.CruiseController;
+import com.g1739.immersiveaircraftcruise.cruise.CruiseModuleData;
 import com.g1739.immersiveaircraftcruise.cruise.CruiseRoute;
 import com.g1739.immersiveaircraftcruise.cruise.CruiseVehicleAccess;
 import com.g1739.immersiveaircraftcruise.network.CruiseNetwork;
+import com.g1739.immersiveaircraftcruise.network.CruiseChunkStatePacket;
 import com.g1739.immersiveaircraftcruise.network.RequestOpenCruiseScreenPacket;
 import com.g1739.immersiveaircraftcruise.network.StopCruiseNavigationPacket;
 import com.g1739.immersiveaircraftcruise.network.ToggleCruiseNavigationPacket;
+import com.g1739.immersiveaircraftcruise.network.UpdateCruisePilotSpeedPacket;
 import com.mojang.blaze3d.platform.InputConstants;
 import immersive_aircraft.client.KeyBindings;
 import immersive_aircraft.entity.VehicleEntity;
 import net.minecraft.client.KeyMapping;
 import net.minecraft.client.Minecraft;
+import net.minecraft.client.multiplayer.ClientChunkCache;
+import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.world.entity.Entity;
+import net.minecraft.world.level.ChunkPos;
+import net.minecraft.world.level.chunk.status.ChunkStatus;
+import net.minecraft.world.level.chunk.EmptyLevelChunk;
+import net.minecraft.world.level.chunk.LevelChunk;
 import net.neoforged.api.distmarker.Dist;
 import net.neoforged.bus.api.SubscribeEvent;
 import net.neoforged.fml.common.EventBusSubscriber;
 import net.neoforged.fml.event.lifecycle.FMLClientSetupEvent;
+import net.neoforged.neoforge.client.event.ClientPlayerNetworkEvent;
 import net.neoforged.neoforge.client.event.ClientTickEvent;
 import net.neoforged.neoforge.client.event.RegisterGuiLayersEvent;
 import net.neoforged.neoforge.client.event.RegisterKeyMappingsEvent;
 import net.neoforged.neoforge.client.gui.VanillaGuiLayers;
+import net.neoforged.neoforge.client.settings.KeyConflictContext;
+import net.neoforged.neoforge.client.settings.KeyModifier;
+import net.neoforged.neoforge.event.level.LevelEvent;
 import org.lwjgl.glfw.GLFW;
 
+import java.util.HashMap;
+import java.util.Map;
+
 public final class CruiseClient {
+    private static final int[] ROUTE_WINDOW_SAMPLES = {0, 1, 2, 3, 5, 10, 25, 50};
+
     public static final KeyMapping OPEN_CRUISE = new KeyMapping(
             "key.immersive_aircraft_cruise.open_cruise",
             InputConstants.Type.KEYSYM,
@@ -34,6 +53,15 @@ public final class CruiseClient {
     );
     public static final KeyMapping TOGGLE_CRUISE = new KeyMapping(
             "key.immersive_aircraft_cruise.toggle_cruise",
+            InputConstants.Type.KEYSYM,
+            GLFW.GLFW_KEY_PERIOD,
+            "key.categories.immersive_aircraft_cruise"
+    );
+    /** Repair key, on its own binding (Alt + navigation key by default), so toggling stays a toggle. */
+    public static final KeyMapping REFRESH_RIDE = new KeyMapping(
+            "key.immersive_aircraft_cruise.refresh_ride",
+            KeyConflictContext.UNIVERSAL,
+            KeyModifier.ALT,
             InputConstants.Type.KEYSYM,
             GLFW.GLFW_KEY_PERIOD,
             "key.categories.immersive_aircraft_cruise"
@@ -48,6 +76,7 @@ public final class CruiseClient {
         public static void registerKeys(RegisterKeyMappingsEvent event) {
             event.register(OPEN_CRUISE);
             event.register(TOGGLE_CRUISE);
+            event.register(REFRESH_RIDE);
         }
 
         @SubscribeEvent
@@ -67,6 +96,19 @@ public final class CruiseClient {
     public static final class ForgeEvents {
         private static boolean brakeWasDown;
         private static boolean dismountWasDown;
+        private static long lastFlightChunkKey = Long.MIN_VALUE;
+        private static boolean lastClientChunkLoaded;
+        private static boolean lastHorizontalCollision;
+        private static long lastFlightDiagnosticTick = Long.MIN_VALUE;
+        private static double lastFlightX;
+        private static double lastFlightY;
+        private static double lastFlightZ;
+        private static int stalledFlightTicks;
+        private static String lastClientContextStatus;
+        private static long lastClientContextDiagnosticTick = Long.MIN_VALUE;
+        private static int lastClientVehicleId = -1;
+        private static final Map<Long, Long> accelerationMissingReportTicks = new HashMap<>();
+        private static int accelerationReportVehicleId = -1;
 
         @SubscribeEvent
         public static void clientTick(ClientTickEvent.Post event) {
@@ -76,6 +118,9 @@ public final class CruiseClient {
             while (TOGGLE_CRUISE.consumeClick()) {
                 CruiseNetwork.sendToServer(togglePacket());
             }
+            while (REFRESH_RIDE.consumeClick()) {
+                ClientPacketHandlers.requestRideResync();
+            }
             boolean brakeDown = KeyBindings.down.isDown();
             boolean dismountDown = KeyBindings.dismount.isDown();
             if ((brakeDown && !brakeWasDown) || (dismountDown && !dismountWasDown)) {
@@ -83,6 +128,275 @@ public final class CruiseClient {
             }
             brakeWasDown = brakeDown;
             dismountWasDown = dismountDown;
+            ClientPacketHandlers.reconcileRouteCacheRadius();
+            CruiseHud.clientTick();
+            reportMissingAccelerationChunks();
+            logClientFlightState();
+            sendPilotSpeedHeartbeat();
+            ClientPacketHandlers.processQueuedCruiseChunks();
+        }
+
+        private static void sendPilotSpeedHeartbeat() {
+            Minecraft minecraft = Minecraft.getInstance();
+            if (minecraft.level == null || minecraft.player == null
+                    || minecraft.level.getGameTime() % 5L != 0L) {
+                return;
+            }
+            Entity root = minecraft.player.getRootVehicle();
+            if (!(root instanceof VehicleEntity vehicle)
+                    || !(vehicle instanceof CruiseVehicleAccess)
+                    || vehicle.getControllingPassenger() != minecraft.player
+                    || !CruiseModuleData.hasModule(vehicle)) {
+                return;
+            }
+            CruiseNetwork.sendToServer(new UpdateCruisePilotSpeedPacket(
+                    vehicle.getId(), CruiseHud.sampleLocalSpeed(vehicle)));
+        }
+
+        @SubscribeEvent
+        public static void clientLoggingOut(ClientPlayerNetworkEvent.LoggingOut event) {
+            ClientPacketHandlers.clearRouteSession();
+        }
+
+        @SubscribeEvent
+        public static void clientLevelUnload(LevelEvent.Unload event) {
+            if (event.getLevel() instanceof ClientLevel) {
+                ClientPacketHandlers.clearRouteSession();
+            }
+        }
+
+        private static void logClientFlightState() {
+            Minecraft minecraft = Minecraft.getInstance();
+            if (minecraft.player == null || minecraft.level == null) {
+                resetFlightDiagnostics();
+                return;
+            }
+            ClientChunkCache chunkSource = minecraft.level.getChunkSource();
+            ChunkPos playerChunk = minecraft.player.chunkPosition();
+            Entity root = minecraft.player.getRootVehicle();
+            if (!CruiseDebug.enabled()) {
+                return;
+            }
+            VehicleEntity vehicle = root instanceof VehicleEntity candidate ? candidate : null;
+            CruiseVehicleAccess access = vehicle instanceof CruiseVehicleAccess candidate ? candidate : null;
+            CruiseRoute route = access == null ? null : access.iacruise$getRoute();
+            String inactiveStatus = null;
+            if (vehicle == null) {
+                inactiveStatus = "root=" + (root == null ? "null" : root.getClass().getSimpleName());
+            } else if (access == null) {
+                inactiveStatus = "vehicle=" + vehicle.getClass().getSimpleName() + ", noCruiseAccess";
+            } else if (route == null) {
+                inactiveStatus = "vehicle=" + vehicle.getClass().getSimpleName() + ", route=null";
+            } else if (!route.isEnabled()) {
+                inactiveStatus = "vehicle=" + vehicle.getClass().getSimpleName()
+                        + ", enabled=false, holding=" + route.isHoldingPattern()
+                        + ", hasTarget=" + route.hasTarget()
+                        + ", routeIndex=" + route.getCurrentIndex();
+            }
+            if (inactiveStatus != null) {
+                logInactiveClientContext(minecraft, root, inactiveStatus);
+                if (lastClientVehicleId >= 0) {
+                    CruiseHud.invalidateSpeedSample(lastClientVehicleId);
+                    lastClientVehicleId = -1;
+                }
+                resetFlightDiagnostics();
+                return;
+            }
+            if (lastClientContextStatus != null) {
+                CruiseDebug.info(ImmersiveAircraftCruise.LOGGER,
+                        "[CruiseChunks][Client] flight context recovered: status={}, playerChunk={}, vehicleChunk={}",
+                        lastClientContextStatus, playerChunk, new ChunkPos(vehicle.blockPosition()));
+                lastClientContextStatus = null;
+                lastClientContextDiagnosticTick = Long.MIN_VALUE;
+            }
+
+            if (lastClientVehicleId != vehicle.getId()) {
+                CruiseHud.invalidateSpeedSample(vehicle.getId());
+                lastClientVehicleId = vehicle.getId();
+            }
+
+            ChunkPos vehicleChunk = new ChunkPos(vehicle.blockPosition());
+            LevelChunk chunk = chunkSource.getChunk(vehicleChunk.x, vehicleChunk.z,
+                    ChunkStatus.FULL, false);
+            boolean loaded = chunk != null && !(chunk instanceof EmptyLevelChunk);
+            boolean moved = vehicle.getX() != lastFlightX
+                    || vehicle.getY() != lastFlightY
+                    || vehicle.getZ() != lastFlightZ;
+            if (moved) {
+                stalledFlightTicks = 0;
+            } else {
+                stalledFlightTicks++;
+            }
+            long clientTick = minecraft.level.getGameTime();
+            boolean changed = vehicleChunk.toLong() != lastFlightChunkKey
+                    || loaded != lastClientChunkLoaded
+                    || vehicle.horizontalCollision != lastHorizontalCollision;
+            boolean periodic = lastFlightDiagnosticTick == Long.MIN_VALUE
+                    || clientTick - lastFlightDiagnosticTick >= 20L;
+            if (changed || periodic || !loaded || vehicle.horizontalCollision || stalledFlightTicks == 10) {
+                String routeWindow = describeRouteWindow(vehicle, access.iacruise$getRoute(), chunkSource, vehicleChunk);
+                String message = String.format(
+                        "[CruiseChunks][Client] flight-check chunk=%s, loaded=%s, "
+                                + "chunkType=%s, loadedChunks=%d, pos=%.2f/%.2f/%.2f, "
+                                + "velocity=%.3f/%.3f/%.3f, horizontalCollision=%s, "
+                                + "verticalCollision=%s, onGround=%s, routeIndex=%d, "
+                                + "stalledTicks=%d, routeWindow=%s, playerChunk=%s, "
+                                + "cacheCenter=%d/%d, cacheRadius=%d",
+                        vehicleChunk, loaded,
+                        chunk == null ? "null" : chunk.getClass().getSimpleName(),
+                        chunkSource.getLoadedChunksCount(),
+                        vehicle.getX(), vehicle.getY(), vehicle.getZ(),
+                        vehicle.getDeltaMovement().x, vehicle.getDeltaMovement().y,
+                        vehicle.getDeltaMovement().z, vehicle.horizontalCollision,
+                        vehicle.verticalCollision, vehicle.onGround(),
+                        access.iacruise$getRoute().getCurrentIndex(), stalledFlightTicks,
+                        routeWindow, playerChunk,
+                        CruiseClientCacheView.centerX(), CruiseClientCacheView.centerZ(),
+                        CruiseClientCacheView.radius());
+                if (!loaded || vehicle.horizontalCollision || stalledFlightTicks >= 10) {
+                    ImmersiveAircraftCruise.LOGGER.warn(message);
+                } else {
+                    ImmersiveAircraftCruise.LOGGER.info(message);
+                }
+                lastFlightDiagnosticTick = clientTick;
+            }
+            lastFlightChunkKey = vehicleChunk.toLong();
+            lastClientChunkLoaded = loaded;
+            lastHorizontalCollision = vehicle.horizontalCollision;
+            lastFlightX = vehicle.getX();
+            lastFlightY = vehicle.getY();
+            lastFlightZ = vehicle.getZ();
+        }
+
+        /**
+         * Report missing route-cache chunks so the server can request their payload again.
+         */
+        private static void reportMissingAccelerationChunks() {
+            Minecraft minecraft = Minecraft.getInstance();
+            if (minecraft.player == null || minecraft.level == null) {
+                accelerationMissingReportTicks.clear();
+                accelerationReportVehicleId = -1;
+                return;
+            }
+            Entity root = minecraft.player.getRootVehicle();
+            if (!(root instanceof VehicleEntity vehicle)
+                    || !(vehicle instanceof CruiseVehicleAccess access)) {
+                accelerationMissingReportTicks.clear();
+                accelerationReportVehicleId = -1;
+                return;
+            }
+            CruiseRoute route = access.iacruise$getRoute();
+            if (route == null
+                    || !route.isEnabled()
+                    || route.isHoldingPattern()
+                    || !route.hasTarget()
+                    || route.getSelectedEntry().loadingMode() == CruiseRoute.RouteLoadingMode.VANILLA
+                    || route.getCruiseMode().powerBonus() <= 0.0f) {
+                accelerationMissingReportTicks.clear();
+                accelerationReportVehicleId = -1;
+                return;
+            }
+            if (accelerationReportVehicleId != vehicle.getId()) {
+                accelerationMissingReportTicks.clear();
+                accelerationReportVehicleId = vehicle.getId();
+            }
+
+            CruiseRoute.Waypoint target = route.getNavigationTarget(vehicle.getX(), vehicle.getZ());
+            if (target == null) {
+                target = route.getTarget();
+            }
+            if (target == null) {
+                accelerationMissingReportTicks.clear();
+                return;
+            }
+            int directionX = Double.compare(target.x() + 0.5d, vehicle.getX());
+            int directionZ = Double.compare(target.z() + 0.5d, vehicle.getZ());
+            ClientChunkCache chunkSource = minecraft.level.getChunkSource();
+            ChunkPos vehicleChunk = new ChunkPos(vehicle.blockPosition());
+            for (int distance = 0; distance < 10; distance++) {
+                int centerX = vehicleChunk.x + directionX * distance;
+                int centerZ = vehicleChunk.z + directionZ * distance;
+                long chunkKey = ChunkPos.asLong(centerX, centerZ);
+                LevelChunk chunk = chunkSource.getChunk(centerX, centerZ, ChunkStatus.FULL, false);
+                boolean loaded = chunk != null && !(chunk instanceof EmptyLevelChunk);
+                if (loaded) {
+                    accelerationMissingReportTicks.remove(chunkKey);
+                } else {
+                    long clientTick = minecraft.level.getGameTime();
+                    Long lastReport = accelerationMissingReportTicks.get(chunkKey);
+                    if (lastReport == null || clientTick - lastReport >= 10L) {
+                        accelerationMissingReportTicks.put(chunkKey, clientTick);
+                        CruiseNetwork.sendToServer(new CruiseChunkStatePacket(
+                                centerX, centerZ, CruiseRouteCache.activeHash(centerX, centerZ),
+                                CruiseChunkStatePacket.State.MISSING));
+                    }
+                }
+            }
+        }
+
+        private static void logInactiveClientContext(Minecraft minecraft, Entity root, String status) {
+            long gameTime = minecraft.level == null ? -1L : minecraft.level.getGameTime();
+            if (!status.equals(lastClientContextStatus)
+                    || lastClientContextDiagnosticTick == Long.MIN_VALUE
+                    || gameTime - lastClientContextDiagnosticTick >= 20L) {
+                String rootState = describeRootState(root);
+                ImmersiveAircraftCruise.LOGGER.warn(
+                        "[CruiseChunks][Client] flight context inactive: status={}, playerChunk={}, "
+                                + "playerPos={}, rootId={}, rootChunk={}, rootState=[{}], gameTime={}, thread={}",
+                        status,
+                        minecraft.player == null ? "none" : minecraft.player.chunkPosition(),
+                        minecraft.player == null ? "none" : String.format("%.2f/%.2f/%.2f",
+                                minecraft.player.getX(), minecraft.player.getY(), minecraft.player.getZ()),
+                        root == null ? -1 : root.getId(),
+                        root == null ? "none" : new ChunkPos(root.blockPosition()),
+                        rootState,
+                        gameTime,
+                        Thread.currentThread().getName());
+                lastClientContextStatus = status;
+                lastClientContextDiagnosticTick = gameTime;
+            }
+        }
+
+        private static String describeRouteWindow(VehicleEntity vehicle, CruiseRoute route,
+                                                   ClientChunkCache chunkSource, ChunkPos vehicleChunk) {
+            CruiseRoute.Waypoint target = route.getTarget();
+            if (target == null) {
+                return "none";
+            }
+            int directionX = Double.compare(target.x() + 0.5d, vehicle.getX());
+            int directionZ = Double.compare(target.z() + 0.5d, vehicle.getZ());
+            int sideX = -directionZ;
+            int sideZ = directionX;
+            StringBuilder result = new StringBuilder();
+            for (int sampleIndex = 0; sampleIndex < ROUTE_WINDOW_SAMPLES.length; sampleIndex++) {
+                int distance = ROUTE_WINDOW_SAMPLES[sampleIndex];
+                if (sampleIndex > 0) {
+                    result.append(';');
+                }
+                int centerX = vehicleChunk.x + directionX * distance;
+                int centerZ = vehicleChunk.z + directionZ * distance;
+                result.append(distance).append('[')
+                        .append(clientChunkState(chunkSource, centerX, centerZ)).append('|')
+                        .append(clientChunkState(chunkSource, centerX + sideX, centerZ + sideZ)).append('|')
+                        .append(clientChunkState(chunkSource, centerX - sideX, centerZ - sideZ)).append(']');
+            }
+            return result.toString();
+        }
+
+        private static String clientChunkState(ClientChunkCache chunkSource, int x, int z) {
+            LevelChunk chunk = chunkSource.getChunk(x, z, ChunkStatus.FULL, false);
+            return chunk == null || chunk instanceof EmptyLevelChunk ? "missing" : "FULL";
+        }
+
+        private static void resetFlightDiagnostics() {
+            lastFlightChunkKey = Long.MIN_VALUE;
+            lastClientChunkLoaded = false;
+            lastHorizontalCollision = false;
+            lastFlightDiagnosticTick = Long.MIN_VALUE;
+            lastFlightX = 0.0d;
+            lastFlightY = 0.0d;
+            lastFlightZ = 0.0d;
+            stalledFlightTicks = 0;
         }
 
         private static ToggleCruiseNavigationPacket togglePacket() {
@@ -133,5 +447,36 @@ public final class CruiseClient {
             CruiseController.stopNavigationEffects(vehicle);
             CruiseController.clearCruiseInputs(vehicle);
         }
+    }
+
+    /**
+     * A ridden aircraft is rendered from the client entity's own rotation plus its shake state, so a
+     * shaking model is diagnosed from the pose/motion/collision fields above together with health.
+     *
+     * <p>The shake state itself is deliberately not read here: Immersive Aircraft 1.4.x exposes it as
+     * {@code getDamageWobble*} while 1.5.x moved the aircraft onto vanilla's vehicle base class and
+     * exposes it as {@code getHurtTime/getHurtDir/getDamage}. Reading either pair would make this jar
+     * throw {@code NoSuchMethodError} on the other generation, so the diagnostic sticks to the members
+     * both generations declare.
+     */
+    private static String describeRootState(Entity root) {
+        if (root == null) {
+            return "none";
+        }
+        String base = String.format(
+                "pos=%.2f/%.2f/%.2f, yaw=%.1f/%.1f, pitch=%.1f/%.1f, motion=%.3f/%.3f/%.3f, tickCount=%d, "
+                        + "onGround=%s, horizontalCollision=%s, verticalCollision=%s, locallyControlled=%s, "
+                        + "controller=%s, alwaysTicking=%s",
+                root.getX(), root.getY(), root.getZ(), root.getYRot(), root.yRotO,
+                root.getXRot(), root.xRotO,
+                root.getDeltaMovement().x, root.getDeltaMovement().y, root.getDeltaMovement().z,
+                root.tickCount, root.onGround(), root.horizontalCollision, root.verticalCollision,
+                root.isControlledByLocalInstance(),
+                root.getControllingPassenger() == null ? "none" : root.getControllingPassenger().getId(),
+                root.isAlwaysTicking());
+        if (!(root instanceof VehicleEntity vehicle)) {
+            return base;
+        }
+        return base + String.format(", health=%.3f", vehicle.getHealth());
     }
 }

@@ -1,5 +1,6 @@
 package com.g1739.immersiveaircraftcruise.client;
 
+
 import net.minecraft.util.Mth;
 import net.neoforged.fml.loading.FMLPaths;
 
@@ -12,7 +13,7 @@ import java.util.Properties;
 
 public final class CruiseHudSettings {
     public static final int WIDTH = 176;
-    public static final int HEIGHT = 104;
+    public static final int HEIGHT = 114;
 
     private static final Path PATH = FMLPaths.CONFIGDIR.get().resolve("immersive_aircraft_cruise_hud.properties");
     private static boolean loaded;

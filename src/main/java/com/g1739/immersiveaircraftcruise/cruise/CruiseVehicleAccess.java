@@ -1,5 +1,6 @@
 package com.g1739.immersiveaircraftcruise.cruise;
 
+
 public interface CruiseVehicleAccess {
     CruiseRoute iacruise$getRoute();
 
