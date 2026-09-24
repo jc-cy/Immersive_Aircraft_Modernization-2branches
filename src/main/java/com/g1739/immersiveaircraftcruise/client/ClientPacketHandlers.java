@@ -175,7 +175,7 @@ public final class ClientPacketHandlers {
         PENDING_ROUTE_STATES.clear();
         PENDING_ACCELERATION_PERMITS.clear();
         PENDING_VEHICLE_INVENTORIES.clear();
-        setRouteCacheRadius(false);
+        releaseRouteCacheRadius();
         CruiseHud.clearFuelInfo();
         CruiseRouteCache.close();
     }
@@ -324,34 +324,62 @@ public final class ClientPacketHandlers {
     private record PendingVehicleInventory(List<SyncVehicleInventoryPacket.Entry> entries, long queuedTick) {
     }
 
-    private static void setRouteCacheRadius(boolean routeEnabled) {
-        if (!routeEnabled) {
-            CruiseClientCacheView.clearRouteRadiusOverride();
-        }
+    /**
+     * The client level whose cache has already been widened. This has to be tracked per level because the
+     * override itself lives in a static holder: a fresh world would otherwise skip the widening and reject
+     * every route packet that falls outside the vanilla cache radius.
+     */
+    private static ClientLevel widenedRouteRadiusLevel;
+
+    /**
+     * Widens this client's chunk cache so it can accept the preloaded corridor.
+     *
+     * <p>The window is never narrowed again. Narrowing it goes through vanilla's
+     * {@code ClientChunkCache#updateViewRadius}, which rebuilds its storage and drops every chunk outside
+     * the new range <b>without telling anyone</b> - no forget packet, no unload event, no state report. The
+     * server cannot see that loss, and it never re-sends a chunk it believes the player already has (its
+     * per-player tracking is purely geometric), so the hole is permanent: the terrain stays missing until
+     * the player leaves and comes back, and an aircraft whose copy sits in one of those chunks leaves the
+     * client's tick list for good - its positions are applied only from {@code VehicleEntity#tick()}, so
+     * every repair, including the strong reset, ends up doing nothing.
+     *
+     * <p>Reclaiming those chunks is not worth any of that: holding a loaded chunk costs nothing next to
+     * loading it, and the corridor is far smaller than the player's own view square. Ownership of the
+     * preload is returned on the server instead, where vanilla unloads what nobody needs - gradually,
+     * after saving, and reversibly.
+     */
+    private static void widenRouteCacheRadius() {
         Minecraft minecraft = Minecraft.getInstance();
-        if (minecraft.level == null) {
+        ClientLevel level = minecraft.level;
+        if (level == null) {
             return;
         }
-        int normalRadius = Math.max(2, minecraft.options.renderDistance().get());
-        int targetRadius = routeEnabled ? ROUTE_CLIENT_CACHE_RADIUS : normalRadius;
-        if (routeEnabled) {
-            CruiseClientCacheView.setRouteRadiusOverride(targetRadius);
-        }
-        if (CruiseClientCacheView.radius() == targetRadius) {
+        // The cache only ever grows: with a render distance above the corridor's own radius the widening
+        // would otherwise be a shrink, and vanilla answers that by rebuilding its storage and dropping the
+        // far ring the player already had - the same silent loss, only further out.
+        int radius = Math.max(ROUTE_CLIENT_CACHE_RADIUS,
+                Math.max(2, minecraft.options.renderDistance().get()));
+        CruiseClientCacheView.setRouteRadiusOverride(radius);
+        if (widenedRouteRadiusLevel == level) {
             return;
         }
-        ClientChunkCache chunkSource = minecraft.level.getChunkSource();
-        ((ClientChunkCacheInvoker) chunkSource).iacruise$updateViewRadius(targetRadius);
+        ClientChunkCache chunkSource = level.getChunkSource();
+        ((ClientChunkCacheInvoker) chunkSource).iacruise$updateViewRadius(radius);
+        widenedRouteRadiusLevel = level;
         CruiseDebug.info(ImmersiveAircraftCruise.LOGGER,
-                "[CruiseChunks][Client] route cache radius switched: enabled={}, radius={}",
-                routeEnabled, targetRadius);
+                "[CruiseChunks][Client] route cache radius widened: radius={}", radius);
+    }
+
+    /** Session teardown only (world unload, disconnect): a fresh level must not inherit the widening. */
+    private static void releaseRouteCacheRadius() {
+        CruiseClientCacheView.clearRouteRadiusOverride();
+        widenedRouteRadiusLevel = null;
     }
 
     /**
-     * Keeps the widened cache bound to the ride state itself: it is on exactly while this client is on
-     * an aircraft whose route is running. Reconciling the state instead of reacting to events means no
-     * dismount path (key, teleport, dimension change, death, chunk unload) can leave it behind, and no
-     * other aircraft's route state can switch it off.
+     * Switches the widened cache on while this client rides an aircraft whose route is running, and
+     * deliberately never switches it off for any other state change: a dismount, a seat hand-over, the
+     * rebuild a hard reset performs and the end of navigation all leave the incoming route window alone.
      */
     public static void reconcileRouteCacheRadius() {
         Minecraft minecraft = Minecraft.getInstance();
@@ -362,7 +390,9 @@ public final class ClientPacketHandlers {
         boolean ridingRoute = root instanceof VehicleEntity vehicle
                 && vehicle instanceof CruiseVehicleAccess access
                 && access.iacruise$getRoute().isEnabled();
-        setRouteCacheRadius(ridingRoute);
+        if (ridingRoute) {
+            widenRouteCacheRadius();
+        }
     }
 
     public static void updateCruiseFuel(int entityId, double x, double y, double z, CruiseFuelInfo fuelInfo) {

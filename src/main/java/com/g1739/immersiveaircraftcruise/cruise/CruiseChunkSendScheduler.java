@@ -86,6 +86,15 @@ public final class CruiseChunkSendScheduler {
     private static final int ROUTE_ACCELERATION_MIN_FULL_CHUNKS = 10;
     /** A route packet that has not been acknowledged for this long is sent again. */
     private static final long ROUTE_PACKET_ACK_TIMEOUT_TICKS = 80L;
+    /**
+     * A flight that stops keeping its preload for this long before the corridor is handed back to vanilla.
+     *
+     * <p>The preload costs generation, not ownership, so re-generating a corridor that was just built - a
+     * course drawn again right after a landing, a touch-and-go, a waypoint re-entered - is the only thing
+     * worth avoiding here. Vanilla unloads whatever nobody needs on its own once our tickets are gone:
+     * gradually, after saving the chunk, and reversibly.
+     */
+    private static final int ROUTE_RELEASE_GRACE_TICKS = 60;
     /** Warn when an occupied aircraft moved this long without a single state broadcast. */
     private static final int BROADCAST_GAP_TICKS = 40;
     private static final double BROADCAST_GAP_MIN_BLOCKS = 1.0d;
@@ -904,7 +913,7 @@ public final class CruiseChunkSendScheduler {
         updateEntityChunkTickets(event.getServer(), activeByPlayer);
         logEntityTickDiagnostics(event.getServer(), activeByPlayer);
         updateAccelerationPermits(activeByPlayer);
-        updateLoadingPriorities(activeByPlayer);
+        updateLoadingPriorities(event.getServer().getTickCount(), activeByPlayer);
         updateNetworkQueues(event.getServer(), activeByPlayer);
     }
 
@@ -1209,7 +1218,8 @@ public final class CruiseChunkSendScheduler {
         }
     }
 
-    private static void updateLoadingPriorities(Map<ServerPlayer, NavigationContext> activeByPlayer) {
+    private static void updateLoadingPriorities(long serverTick,
+                                                Map<ServerPlayer, NavigationContext> activeByPlayer) {
         Map<ChunkMap, DesiredLoading> desiredByMap = new IdentityHashMap<>();
         Set<NavigationContext> activeFlights = java.util.Collections.newSetFromMap(new IdentityHashMap<>());
         activeFlights.addAll(activeByPlayer.values());
@@ -1229,12 +1239,23 @@ public final class CruiseChunkSendScheduler {
         Iterator<Map.Entry<ChunkMap, LoadingState>> iterator = LOADING_STATES.entrySet().iterator();
         while (iterator.hasNext()) {
             Map.Entry<ChunkMap, LoadingState> entry = iterator.next();
+            LoadingState state = entry.getValue();
             DesiredLoading desired = desiredByMap.remove(entry.getKey());
-            if (desired == null || desired.chunkSource != entry.getValue().chunkSource) {
-                entry.getValue().clear();
+            if (desired == null) {
+                // The flight ended: keep the corridor a moment longer so that drawing the same course again
+                // reuses the terrain instead of generating it a second time, then hand it back to vanilla.
+                state.beginRelease(serverTick);
+                if (state.releaseDue(serverTick)) {
+                    state.clear();
+                    iterator.remove();
+                }
+            } else if (desired.chunkSource != state.chunkSource) {
+                // Not a flight transition (the level behind this chunk map was replaced): drop it at once.
+                state.clear();
                 iterator.remove();
             } else {
-                entry.getValue().synchronize(desired.priorityChunks, desired.routeSlices);
+                state.cancelRelease();
+                state.synchronize(desired.priorityChunks, desired.routeSlices);
             }
         }
 
@@ -1884,10 +1905,27 @@ public final class CruiseChunkSendScheduler {
         private final LinkedHashSet<Long> loggedFullChunks = new LinkedHashSet<>();
         private long scheduleOrder;
         private long fullOrder;
+        private long releaseAtTick = Long.MIN_VALUE;
 
         private LoadingState(ServerChunkCache chunkSource, ChunkMap chunkMap) {
             this.chunkSource = chunkSource;
             this.chunkMap = chunkMap;
+        }
+
+        /** Opens the release window after a flight stopped needing this corridor. */
+        private void beginRelease(long serverTick) {
+            if (releaseAtTick == Long.MIN_VALUE) {
+                releaseAtTick = serverTick + ROUTE_RELEASE_GRACE_TICKS;
+            }
+        }
+
+        /** Cancels a pending release: the same corridor is needed again before the window elapsed. */
+        private void cancelRelease() {
+            releaseAtTick = Long.MIN_VALUE;
+        }
+
+        private boolean releaseDue(long serverTick) {
+            return releaseAtTick != Long.MIN_VALUE && serverTick >= releaseAtTick;
         }
 
         private void synchronize(LinkedHashMap<Long, Integer> desiredChunks, List<RouteSlice> desiredSlices) {
@@ -2072,6 +2110,7 @@ public final class CruiseChunkSendScheduler {
             loggedFullChunks.clear();
             scheduleOrder = 0L;
             fullOrder = 0L;
+            releaseAtTick = Long.MIN_VALUE;
             DistanceManager distanceManager = ((ServerChunkCacheInvoker) chunkSource)
                     .iacruise$getDistanceManager();
             for (long chunkKey : heldRoutePreloadTickets) {

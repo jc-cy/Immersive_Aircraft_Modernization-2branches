@@ -84,7 +84,12 @@ public final class CruiseController {
     private static final double FAST_LANDING_POST_BRAKE_STOP_SPEED = 0.06;
     private static final double LANDING_VERTICAL_STOP_SPEED = 0.08;
     private static final int POST_LANDING_BRAKE_TICKS = 100;
-    private static final double FAST_LANDING_DESCENT_BUFFER = 8.0;
+    /**
+     * Margin over the predicted descent distance before the landing sequence takes over. Eight blocks was
+     * barely one tick at cruise speed (117 blocks/s is 5.85 blocks/tick), so any prediction error was
+     * already too late; 100 blocks is roughly 17 ticks of slack at that speed.
+     */
+    private static final double FAST_LANDING_DESCENT_BUFFER = 100.0;
     private static final double FAST_LANDING_BRAKE_BUFFER = 0.0;
     private static final double FAST_LANDING_BRAKE_RESPONSE_TICKS = 1.0;
     private static final int FAST_LANDING_BRAKE_SIMULATION_TICKS = 120;
@@ -188,6 +193,8 @@ public final class CruiseController {
     private static final Map<VehicleEntity, Vec3> FAST_LANDING_LAST_OFFSET = new WeakHashMap<>();
     private static final Map<VehicleEntity, Boolean> FAST_LANDING_PASSED_TARGET = new WeakHashMap<>();
     private static final Map<VehicleEntity, Integer> POST_LANDING_STOPPED = new WeakHashMap<>();
+    /** One report per approach, so the L-to-straight switch distance can be read back from a log. */
+    private static final Map<VehicleEntity, Boolean> MODE_SWITCH_REPORTED = new WeakHashMap<>();
     private static final Map<VehicleEntity, BoostSyncState> LAST_CLIENT_BOOST_SYNC = new WeakHashMap<>();
 
     private record LAlignmentPlan(int stage, boolean firstAxis, float targetYaw,
@@ -470,22 +477,39 @@ public final class CruiseController {
 
         CruiseRoute.Waypoint waypoint = route.getTarget();
         Vec3 referencePosition = horizontalReferencePosition(vehicle);
-        boolean useLShapedRoute = route.shouldUseLShaped(referencePosition.x, referencePosition.z);
-        if (useLShapedRoute
-                && tickLShapedNavigation(vehicle, access, route, waypoint, clientSide)) {
-            return;
-        }
-        referencePosition = horizontalReferencePosition(vehicle);
-        CruiseRoute.Waypoint steeringWaypoint = route.getNavigationTarget(referencePosition.x, referencePosition.z);
         double actualDx = waypoint.x() + 0.5 - referencePosition.x;
         double actualDz = waypoint.z() + 0.5 - referencePosition.z;
         double actualDistance = Math.sqrt(actualDx * actualDx + actualDz * actualDz);
+        // The L controller only flies the corner and holds the long axis; the whole landing sequence lives
+        // in the straight-line mode, so the switch has to happen far enough out for that mode's own
+        // prediction to still work. The distance is that prediction (never a new algorithm).
+        double modeSwitchRadius = landingModeSwitchRadius(vehicle, route, actualDistance);
+        boolean useLShapedRoute = route.shouldUseLShaped(referencePosition.x, referencePosition.z);
+        if (useLShapedRoute
+                && tickLShapedNavigation(vehicle, access, route, waypoint, modeSwitchRadius, clientSide)) {
+            return;
+        }
+        if (useLShapedRoute
+                && route.getLoadingStage() >= CruiseRoute.L_STAGE_FINAL_LEG
+                && actualDistance <= modeSwitchRadius
+                && MODE_SWITCH_REPORTED.put(vehicle, Boolean.TRUE) == null) {
+            // Handing the aircraft to the straight-line mode has to drop the L heading lock with it.
+            releaseLDirectionLock(vehicle);
+            ImmersiveAircraftCruise.LOGGER.info(
+                    "[CruiseHandoff] L -> straight-line mode: vehicle={}, distance={}, radius={}, "
+                            + "altitudeError={}, speed={}, landingMode={}",
+                    vehicle.getId(), Math.round(actualDistance), Math.round(modeSwitchRadius),
+                    Math.round(landingAltitudeError(vehicle, route.getFinalAltitude())),
+                    Math.round(horizontalSpeed(vehicle)), route.getEffectiveLandingMode());
+        }
+        referencePosition = horizontalReferencePosition(vehicle);
+        CruiseRoute.Waypoint steeringWaypoint = route.getNavigationTarget(referencePosition.x, referencePosition.z);
         double dx = steeringWaypoint.x() + 0.5 - referencePosition.x;
         double dz = steeringWaypoint.z() + 0.5 - referencePosition.z;
         double horizontalDistance = Math.sqrt(dx * dx + dz * dz);
         boolean lLandingHandoff = !route.shouldUseLShaped(referencePosition.x, referencePosition.z)
                 || route.getLoadingStage() >= CruiseRoute.L_STAGE_FINAL_LEG
-                && actualDistance <= CruiseRoute.L_FINAL_LANDING_HANDOFF_DISTANCE;
+                && actualDistance <= modeSwitchRadius;
         if (lLandingHandoff && tickFinalLandingApproach(vehicle, access, route, waypoint, actualDistance, actualDx, actualDz, clientSide)) {
             return;
         }
@@ -513,9 +537,10 @@ public final class CruiseController {
             dx = steeringWaypoint.x() + 0.5 - referencePosition.x;
             dz = steeringWaypoint.z() + 0.5 - referencePosition.z;
             horizontalDistance = Math.sqrt(dx * dx + dz * dz);
+            double advancedSwitchRadius = landingModeSwitchRadius(vehicle, route, actualDistance);
             if (!route.shouldUseLShaped(referencePosition.x, referencePosition.z)
                     || route.getLoadingStage() >= CruiseRoute.L_STAGE_FINAL_LEG
-                    && actualDistance <= CruiseRoute.L_FINAL_LANDING_HANDOFF_DISTANCE
+                    && actualDistance <= advancedSwitchRadius
                     && tickFinalLandingApproach(vehicle, access, route, waypoint, actualDistance, actualDx, actualDz, clientSide)) {
                 return;
             }
@@ -564,11 +589,12 @@ public final class CruiseController {
      * L mode deliberately avoids the ordinary waypoint steering loop. It
      * first captures a chunk-center line, locks the short axis, starts the
      * corner turn at the predicted braking/rotation distance, and then holds
-     * the long axis until the final landing handoff radius.
+     * the long axis until the computed mode-switch radius, where the aircraft
+     * is handed to the straight-line mode (which owns the landing sequence).
      */
     private static boolean tickLShapedNavigation(VehicleEntity vehicle, CruiseVehicleAccess access,
                                                   CruiseRoute route, CruiseRoute.Waypoint waypoint,
-                                                  boolean clientSide) {
+                                                  double modeSwitchRadius, boolean clientSide) {
         Vec3 reference = horizontalReferencePosition(vehicle);
         int stage = route.getLoadingStage();
 
@@ -656,7 +682,7 @@ public final class CruiseController {
             double actualDx = waypoint.x() + 0.5d - reference.x;
             double actualDz = waypoint.z() + 0.5d - reference.z;
             double actualDistance = Math.sqrt(actualDx * actualDx + actualDz * actualDz);
-            if (route.isFinalTarget() && actualDistance <= CruiseRoute.L_FINAL_LANDING_HANDOFF_DISTANCE) {
+            if (route.isFinalTarget() && actualDistance <= modeSwitchRadius) {
                 return false;
             }
             if (!route.isFinalTarget() && actualDistance <= waypointReachRadius(vehicle, route)
@@ -1472,6 +1498,38 @@ public final class CruiseController {
         return route.getTargetAltitude();
     }
 
+    /**
+     * Distance at which the L controller hands the aircraft over to the straight-line mode.
+     *
+     * <p>The L five-stage controller only captures the corner and holds the long axis - it has no landing
+     * sequence - while the straight-line mode owns the whole landing path. The switch therefore has to
+     * happen far enough out for the landing prediction to still work, and that prediction already exists
+     * ({@link #fastLandingPlan}): the radius is simply the longer of its two simulated distances, never
+     * shorter than the fixed floor and never a second algorithm.
+     */
+    private static double landingModeSwitchRadius(VehicleEntity vehicle, CruiseRoute route,
+                                                  double horizontalDistance) {
+        if (!route.isFinalTarget()
+                || route.getEffectiveLandingMode() == CruiseRoute.LandingMode.HOLDING_PATTERN) {
+            return CruiseRoute.L_FINAL_LANDING_HANDOFF_DISTANCE;
+        }
+        double altitudeError = landingAltitudeError(vehicle, route.getFinalAltitude());
+        if (isVerticalAircraft(vehicle)) {
+            // Rotorcraft descend far slower than they fly, so their reach is measured with their own
+            // prediction - the airplane one falls back to a rough geometric stop estimate for them.
+            RotorcraftLandingPlan plan = rotorcraftLandingPlan(vehicle, horizontalDistance, altitudeError);
+            double hoverDescentReach = plan.descentDistance() + ROTORCRAFT_FAST_LANDING_BRAKE_BUFFER;
+            double hoverStopReach = plan.stopDistance() + ROTORCRAFT_FAST_LANDING_BRAKE_BUFFER;
+            return Math.max(CruiseRoute.L_FINAL_LANDING_HANDOFF_DISTANCE,
+                    Math.max(hoverDescentReach, hoverStopReach));
+        }
+        FastLandingPlan plan = fastLandingPlan(vehicle, horizontalDistance, altitudeError,
+                landingHorizontalRadius(vehicle, FAST_LANDING_HORIZONTAL_RADIUS));
+        double descentReach = plan.descentDistance() + FAST_LANDING_DESCENT_BUFFER;
+        double stopReach = plan.stopDistance() + FAST_LANDING_BRAKE_BUFFER;
+        return Math.max(CruiseRoute.L_FINAL_LANDING_HANDOFF_DISTANCE, Math.max(descentReach, stopReach));
+    }
+
     private static boolean tickFinalLandingApproach(VehicleEntity vehicle, CruiseVehicleAccess access, CruiseRoute route, CruiseRoute.Waypoint waypoint,
                                                     double horizontalDistance, double dx, double dz, boolean clientSide) {
         if (!route.isFinalTarget()) {
@@ -1905,6 +1963,7 @@ public final class CruiseController {
         FAST_LANDING_LAST_OFFSET.remove(vehicle);
         FAST_LANDING_PASSED_TARGET.remove(vehicle);
         POST_LANDING_STOPPED.remove(vehicle);
+        MODE_SWITCH_REPORTED.remove(vehicle);
     }
 
     private static double brakingDecay(VehicleEntity vehicle) {
@@ -3460,6 +3519,20 @@ public final class CruiseController {
     }
 
     /**
+     * Drops the L heading lock together with the hand-over to the straight-line mode.
+     *
+     * <p>The snap below exists so residual native turn input cannot push an L leg off its axis, and it
+     * must end the moment the L controller stops flying: the straight-line mode and the landing sequence
+     * steer for themselves, and a snap that keeps running pulls the nose back onto the L axis every tick -
+     * the aircraft then cannot turn onto its final heading and lands crooked.
+     */
+    private static void releaseLDirectionLock(VehicleEntity vehicle) {
+        L_ALIGNMENT_PLANS.remove(vehicle);
+        L_PENDING_HEADING_SNAPS.remove(vehicle);
+        L_TURN_STATES.remove(vehicle);
+    }
+
+    /**
      * The aircraft's native controller applies the interpolated turn input
      * after the navigation tick has chosen a command. When an L leg is
      * already inside one native turn tick, finish the small remaining angle
@@ -3474,6 +3547,11 @@ public final class CruiseController {
         boolean lShapedRoute = route != null && route.shouldUseLShaped(vehicle.getX(), vehicle.getZ());
         boolean directLLine = route != null && route.isLongLRouteCandidate() && !lShapedRoute;
         if (route == null || !route.isEnabled() || (!lShapedRoute && !directLLine)) {
+            return;
+        }
+        if (LANDING_ACTIVE.containsKey(vehicle) || FAST_LANDING_FINAL_BRAKE_ACTIVE.containsKey(vehicle)) {
+            // Once the landing sequence owns the aircraft it steers for itself; a snap onto the L axis
+            // would only fight it, which is what makes the nose feel locked near the touchdown point.
             return;
         }
         Float pendingHeadingSnap = L_PENDING_HEADING_SNAPS.remove(vehicle);
