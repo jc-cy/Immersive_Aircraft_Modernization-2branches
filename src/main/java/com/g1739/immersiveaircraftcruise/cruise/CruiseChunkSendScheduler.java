@@ -32,6 +32,7 @@ import net.minecraft.world.phys.Vec3;
 import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.chunk.LevelChunk;
 import net.minecraftforge.common.MinecraftForge;
+import net.minecraftforge.event.ForgeEventFactory;
 import net.minecraftforge.event.TickEvent;
 import net.minecraftforge.event.entity.EntityTeleportEvent;
 import net.minecraftforge.event.entity.player.PlayerEvent;
@@ -2328,6 +2329,11 @@ public final class CruiseChunkSendScheduler {
                     new com.g1739.immersiveaircraftcruise.network.CruiseRouteChunkPacket(
                             cacheNamespace, player.serverLevel().dimension().location().toString(),
                             chunk.getPos().x, chunk.getPos().z, hash, payload));
+            // Vanilla fires the chunk watch event at the tail of ChunkMap#playerLoadedChunk, which we skip
+            // for route chunks (ChunkMapMixin#iacruise$skipDuplicateChunk). Mods that sync per-chunk client
+            // data through it (TFC and its terrain addons send the climate/rain layers there) would otherwise
+            // keep their client-side fallback colours, so fire it ourselves right after the route payload.
+            ForgeEventFactory.fireChunkWatch(player, chunk, player.serverLevel());
             pendingHashes.put(chunkKey, hash);
             pendingSentTicks.put(chunkKey, serverTick);
             sentChunks.add(chunkKey);
