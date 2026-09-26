@@ -32,6 +32,7 @@ import net.minecraft.world.phys.Vec3;
 import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.chunk.LevelChunk;
 import net.neoforged.neoforge.common.NeoForge;
+import net.neoforged.neoforge.event.EventHooks;
 import net.neoforged.neoforge.event.tick.ServerTickEvent;
 import net.neoforged.neoforge.event.entity.EntityTeleportEvent;
 import net.neoforged.neoforge.event.entity.player.PlayerEvent;
@@ -2334,6 +2335,13 @@ public final class CruiseChunkSendScheduler {
                     new com.g1739.immersiveaircraftcruise.network.CruiseRouteChunkPacket(
                             cacheNamespace, player.serverLevel().dimension().location().toString(),
                             chunk.getPos().x, chunk.getPos().z, hash, payload));
+            // 1.20 fired ForgeEventFactory.fireChunkWatch here; on 1.21 the event split in two. ChunkMap
+            // still fires ChunkWatchEvent.Watch (unsuppressed, but only when the player's own view reaches
+            // the chunk) while PlayerChunkSender#sendChunk, which PlayerChunkSenderMixin cancels for route
+            // chunks, fires ChunkWatchEvent.Sent. NeoForge documents Sent as the event that may send
+            // additional chunk data (Watch must not), and TFC 1.21 syncs its climate layers from Sent, so
+            // fire it ourselves right after the route payload.
+            EventHooks.fireChunkSent(player, chunk, player.serverLevel());
             pendingHashes.put(chunkKey, hash);
             pendingSentTicks.put(chunkKey, serverTick);
             sentChunks.add(chunkKey);
