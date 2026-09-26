@@ -82,6 +82,12 @@ public final class CruiseController {
     private static final double FAST_LANDING_PLAN_ALTITUDE_RADIUS = 1.0;
     private static final double FAST_LANDING_COMPLETION_ALTITUDE_RADIUS = 1.0;
     private static final double FAST_LANDING_POST_BRAKE_STOP_SPEED = 0.06;
+    /**
+     * The route stores the ground block's Y (the field tooltip says "the player's coordinate - 1", which is exactly
+     * that block). A conventional aircraft comes to rest with its footprint on the block's top surface, one block
+     * above that Y, so the stored value is lifted by one block for those aircraft only.
+     */
+    private static final double AIRPLANE_LANDING_BLOCK_TO_SURFACE = 1.0d;
     private static final double LANDING_VERTICAL_STOP_SPEED = 0.08;
     private static final int POST_LANDING_BRAKE_TICKS = 100;
     /**
@@ -125,6 +131,13 @@ public final class CruiseController {
     private static final double AIRPLANE_GROUND_APPROACH_DEAD_ZONE = 0.25;
     private static final float AIRPLANE_GROUND_APPROACH_INPUT = 1.0f;
     private static final double AIRPLANE_GROUND_APPROACH_CAPTURE_RADIUS = 3.0;
+    /**
+     * Airborne overshoot of the final target that is flown straight instead of corrected. A small overshoot is not
+     * worth turning back for - doing so turns an otherwise straight landing into a last-second swing. The original
+     * correction resumes as soon as the overshoot grows past this radius, and after that it is never suppressed again
+     * for the same landing.
+     */
+    private static final double AIRPLANE_AIR_OVERSHOOT_TURN_RADIUS = 5.0;
     private static final float AIRPLANE_GROUND_TURNAROUND_INPUT = 0.8f;
     private static final float AIRPLANE_GROUND_TURN_INPUT = 0.8f;
     private static final float AIRPLANE_GROUND_REVERSE_YAW_DEAD_ZONE = 8.0f;
@@ -193,6 +206,10 @@ public final class CruiseController {
     private static final Map<VehicleEntity, Vec3> FAST_LANDING_LAST_OFFSET = new WeakHashMap<>();
     private static final Map<VehicleEntity, Boolean> FAST_LANDING_PASSED_TARGET = new WeakHashMap<>();
     private static final Map<VehicleEntity, Integer> POST_LANDING_STOPPED = new WeakHashMap<>();
+    /** Airborne overshoot turn state: 1 = suppressed (small overshoot), 2 = released (correction allowed). */
+    private static final Map<VehicleEntity, Integer> FAST_LANDING_AIR_TURN_STATE = new WeakHashMap<>();
+    private static final int FAST_LANDING_AIR_TURN_SUPPRESSED = 1;
+    private static final int FAST_LANDING_AIR_TURN_RELEASED = 2;
     /** One report per approach, so the L-to-straight switch distance can be read back from a log. */
     private static final Map<VehicleEntity, Boolean> MODE_SWITCH_REPORTED = new WeakHashMap<>();
     private static final Map<VehicleEntity, BoostSyncState> LAST_CLIENT_BOOST_SYNC = new WeakHashMap<>();
@@ -499,7 +516,7 @@ public final class CruiseController {
                     "[CruiseHandoff] L -> straight-line mode: vehicle={}, distance={}, radius={}, "
                             + "altitudeError={}, speed={}, landingMode={}",
                     vehicle.getId(), Math.round(actualDistance), Math.round(modeSwitchRadius),
-                    Math.round(landingAltitudeError(vehicle, route.getFinalAltitude())),
+                    Math.round(landingAltitudeError(vehicle, landingTargetAltitude(vehicle, route))),
                     Math.round(horizontalSpeed(vehicle)), route.getEffectiveLandingMode());
         }
         referencePosition = horizontalReferencePosition(vehicle);
@@ -1513,7 +1530,7 @@ public final class CruiseController {
                 || route.getEffectiveLandingMode() == CruiseRoute.LandingMode.HOLDING_PATTERN) {
             return CruiseRoute.L_FINAL_LANDING_HANDOFF_DISTANCE;
         }
-        double altitudeError = landingAltitudeError(vehicle, route.getFinalAltitude());
+        double altitudeError = landingAltitudeError(vehicle, landingTargetAltitude(vehicle, route));
         if (isVerticalAircraft(vehicle)) {
             // Rotorcraft descend far slower than they fly, so their reach is measured with their own
             // prediction - the airplane one falls back to a rough geometric stop estimate for them.
@@ -1604,8 +1621,9 @@ public final class CruiseController {
             return true;
         }
         tickRotorcraftHoverControl(vehicle, waypoint.x() + 0.5, waypoint.z() + 0.5,
-                landingAltitudeError(vehicle, route.getFinalAltitude()), true, true);
-        if (isLandingComplete(vehicle, waypoint, route.getFinalAltitude(), VERTICAL_AIRCRAFT_LANDING_HORIZONTAL_RADIUS,
+                landingAltitudeError(vehicle, landingTargetAltitude(vehicle, route)), true, true);
+        if (isLandingComplete(vehicle, waypoint, landingTargetAltitude(vehicle, route),
+                VERTICAL_AIRCRAFT_LANDING_HORIZONTAL_RADIUS,
                 LANDING_ALTITUDE_RADIUS, LANDING_VERTICAL_STOP_SPEED)) {
             finishLanding(vehicle, access, route, clientSide);
         }
@@ -1623,7 +1641,7 @@ public final class CruiseController {
         if (isVerticalAircraft(vehicle)) {
             return tickRotorcraftFastestLanding(vehicle, access, route, landingTarget, horizontalDistance, dx, dz, clientSide);
         }
-        double altitudeError = landingAltitudeError(vehicle, route.getFinalAltitude());
+        double altitudeError = landingAltitudeError(vehicle, landingTargetAltitude(vehicle, route));
         Integer postBrakeTicks = POST_LANDING_BRAKE.get(vehicle);
         if (postBrakeTicks != null) {
             tickPostLandingBrake(vehicle, access, route, postBrakeTicks, clientSide);
@@ -1642,7 +1660,8 @@ public final class CruiseController {
             if (handleNavigationHorizontalCollision(vehicle, access, route, clientSide)) {
                 return true;
             }
-            if (isFastLandingReadyForPostBrake(vehicle, landingTarget.x(), landingTarget.z(), route.getFinalAltitude())) {
+            if (isFastLandingReadyForPostBrake(vehicle, landingTarget.x(), landingTarget.z(),
+                    landingTargetAltitude(vehicle, route))) {
                 beginPostLandingBrake(vehicle, access, route, clientSide);
                 return true;
             }
@@ -1651,6 +1670,7 @@ public final class CruiseController {
         }
         if (!LANDING_ACTIVE.containsKey(vehicle)
                 && !FAST_LANDING_FINAL_BRAKE_ACTIVE.containsKey(vehicle)
+                && !isAirTurnSuppressed(vehicle)
                 && Math.abs(yawError) > FAST_LANDING_APPROACH_YAW_LIMIT) {
             if (tickFastLandingAlignGuard(vehicle, yawError, horizontalDistance)) {
                 stopBoostingImmediately(vehicle, access);
@@ -1673,7 +1693,8 @@ public final class CruiseController {
             FAST_LANDING_FINAL_BRAKE_ACTIVE.put(vehicle, true);
         }
 
-        float turn = horizontalDistance > FAST_LANDING_TURN_RADIUS ? fastLandingTurnInput(vehicle, yawError, horizontalDistance) : 0.0f;
+        float turn = horizontalDistance > FAST_LANDING_TURN_RADIUS && !isAirTurnSuppressed(vehicle)
+                ? fastLandingTurnInput(vehicle, yawError, horizontalDistance) : 0.0f;
         boolean activelyReducingSpeed = finalBrake;
         FlareEstimate flareEstimate = flareEstimate(vehicle, finalBrake, plan.boostTarget(), horizontalDistance,
                 plan.stopTicks(), plan.rawDescent());
@@ -1728,7 +1749,8 @@ public final class CruiseController {
             brakeForLanding(vehicle, horizontalDistance);
         }
 
-        if (isFastLandingReadyForPostBrake(vehicle, landingTarget.x(), landingTarget.z(), route.getFinalAltitude())) {
+        if (isFastLandingReadyForPostBrake(vehicle, landingTarget.x(), landingTarget.z(),
+                landingTargetAltitude(vehicle, route))) {
             beginPostLandingBrake(vehicle, access, route, clientSide);
         }
         return true;
@@ -1962,6 +1984,7 @@ public final class CruiseController {
     private static void clearLandingAssistState(VehicleEntity vehicle) {
         FAST_LANDING_LAST_OFFSET.remove(vehicle);
         FAST_LANDING_PASSED_TARGET.remove(vehicle);
+        FAST_LANDING_AIR_TURN_STATE.remove(vehicle);
         POST_LANDING_STOPPED.remove(vehicle);
         MODE_SWITCH_REPORTED.remove(vehicle);
     }
@@ -2206,7 +2229,11 @@ public final class CruiseController {
     private static void updateFastLandingPassState(VehicleEntity vehicle, double dx, double dz, double horizontalDistance) {
         Vec3 currentOffset = new Vec3(dx, 0.0d, dz);
         Vec3 previousOffset = FAST_LANDING_LAST_OFFSET.put(vehicle, currentOffset);
-        if (previousOffset == null || Boolean.TRUE.equals(FAST_LANDING_PASSED_TARGET.get(vehicle))) {
+        if (previousOffset == null) {
+            return;
+        }
+        updateAirTurnState(vehicle, previousOffset, currentOffset, horizontalDistance);
+        if (Boolean.TRUE.equals(FAST_LANDING_PASSED_TARGET.get(vehicle))) {
             return;
         }
         Vec3 travel = currentOffset.subtract(previousOffset);
@@ -2220,6 +2247,35 @@ public final class CruiseController {
                 && dotHorizontal(previousOffset, currentOffset) <= 0.0d) {
             FAST_LANDING_PASSED_TARGET.put(vehicle, true);
         }
+    }
+
+    /**
+     * Airborne overshoot handling for the final target: crossing the target with a small overshoot is flown straight
+     * (no turn), so an otherwise straight landing is not turned into a last-second swing. As soon as the overshoot
+     * grows past {@link #AIRPLANE_AIR_OVERSHOOT_TURN_RADIUS} the original correction takes over, and once it has taken
+     * over it is never suppressed again for this landing (no suppress/release loop). Only the airborne phase is
+     * affected - the ground roll-out keeps its own logic untouched.
+     */
+    private static void updateAirTurnState(VehicleEntity vehicle, Vec3 previousOffset, Vec3 currentOffset,
+                                           double horizontalDistance) {
+        Integer state = FAST_LANDING_AIR_TURN_STATE.get(vehicle);
+        if (state == null) {
+            if (dotHorizontal(previousOffset, currentOffset) > 0.0d) {
+                return;
+            }
+            state = horizontalDistance <= AIRPLANE_AIR_OVERSHOOT_TURN_RADIUS
+                    ? FAST_LANDING_AIR_TURN_SUPPRESSED
+                    : FAST_LANDING_AIR_TURN_RELEASED;
+        } else if (state == FAST_LANDING_AIR_TURN_SUPPRESSED
+                && horizontalDistance > AIRPLANE_AIR_OVERSHOOT_TURN_RADIUS) {
+            state = FAST_LANDING_AIR_TURN_RELEASED;
+        }
+        FAST_LANDING_AIR_TURN_STATE.put(vehicle, state);
+    }
+
+    private static boolean isAirTurnSuppressed(VehicleEntity vehicle) {
+        return !vehicle.onGround()
+                && FAST_LANDING_AIR_TURN_STATE.getOrDefault(vehicle, 0) == FAST_LANDING_AIR_TURN_SUPPRESSED;
     }
 
     private static boolean isAirplaneCapturedOvershoot(VehicleEntity vehicle, double horizontalDistance) {
@@ -2949,6 +3005,18 @@ public final class CruiseController {
         return isVerticalAircraft(vehicle) ? VERTICAL_AIRCRAFT_LANDING_HORIZONTAL_RADIUS : fallbackRadius;
     }
 
+    /**
+     * Landing altitude the aircraft has to reach.
+     *
+     * <p>The stored value is the ground block's Y, so a conventional aircraft - which rests with its footprint on that
+     * block's top surface - has to reach one block above it. Hovering aircraft keep the stored value unchanged: their
+     * landing reference is the pilot/box under the ride rather than the ground footprint.
+     */
+    private static double landingTargetAltitude(VehicleEntity vehicle, CruiseRoute route) {
+        double stored = route.getFinalAltitude();
+        return isVerticalAircraft(vehicle) ? stored : stored + AIRPLANE_LANDING_BLOCK_TO_SURFACE;
+    }
+
     private static double landingAltitudeError(VehicleEntity vehicle, double targetAltitude) {
         return targetAltitude - landingContactY(vehicle);
     }
@@ -2974,15 +3042,35 @@ public final class CruiseController {
         return vehicle.getY() + landingContactOffset(vehicle);
     }
 
+    /**
+     * Height offset from the aircraft position to the point treated as its landing contact.
+     *
+     * <p>A conventional aircraft lands on its footprint - the bottom of the main collision box, which is exactly the
+     * entity position. The {@code boundingBoxes} are model shapes: they rotate with the attitude and on some aircraft
+     * they sit below the origin (the bamboo hopper hull is half a block lower and its wings dip further while it
+     * pitches), so using them as the landing reference moved the target with the touchdown attitude - the same ground
+     * then needed a different value per landing. Hovering aircraft keep their own reference (the box under the pilot
+     * when riding, otherwise the lowest box).
+     */
     private static double landingContactOffset(VehicleEntity vehicle) {
-        if (isVerticalAircraft(vehicle) && vehicle.getControllingPassenger() != null) {
-            return landingContactOffsetNearReference(vehicle, vehicle.getXRot(), horizontalReferencePosition(vehicle));
+        if (isVerticalAircraft(vehicle)) {
+            if (vehicle.getControllingPassenger() != null) {
+                return landingContactOffsetNearReference(vehicle, vehicle.getXRot(), horizontalReferencePosition(vehicle));
+            }
+            return lowestLandingContactOffset(vehicle, vehicle.getXRot());
         }
-        return lowestLandingContactOffset(vehicle, vehicle.getXRot());
+        return 0.0d;
     }
 
+    /**
+     * Airplane descent/flare/braking simulations use the same fixed footprint reference as the landing target, so an
+     * attitude change no longer moves the reference point. Hovering aircraft keep the model box term.
+     */
     private static double simulatedLandingContactOffset(VehicleEntity vehicle, double pitch) {
-        return lowestLandingContactOffset(vehicle, pitch);
+        if (isVerticalAircraft(vehicle)) {
+            return lowestLandingContactOffset(vehicle, pitch);
+        }
+        return 0.0d;
     }
 
     private static double lowestLandingContactOffset(VehicleEntity vehicle, double pitch) {
@@ -3096,8 +3184,16 @@ public final class CruiseController {
         return new LandingTarget(waypoint.x() + 0.5, waypoint.z() + 0.5);
     }
 
+    /**
+     * Horizontal reference for every distance check: waypoint reach, approach distance, L-shape steering, landing
+     * handoff and the landing completion test.
+     *
+     * <p>The rider judges a landing by their own position, so the controlling passenger is the reference for every
+     * aircraft and the vehicle position is only a fallback when nobody is riding. Vertical checks are separate: they
+     * keep using the aircraft's real ground contact (its footprint).
+     */
     private static Vec3 horizontalReferencePosition(VehicleEntity vehicle) {
-        LivingEntity pilot = isVerticalAircraft(vehicle) ? vehicle.getControllingPassenger() : null;
+        LivingEntity pilot = vehicle.getControllingPassenger();
         return pilot == null ? vehicle.position() : pilot.position();
     }
 
