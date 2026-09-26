@@ -159,7 +159,6 @@ public final class CruiseController {
     private static final float FAST_LANDING_GROUND_TAXI_BRAKE_INPUT = -0.35f;
     private static final double FAST_LANDING_GROUND_TAXI_TARGET_SPEED = 8.0d / 20.0d;
     private static final double FAST_LANDING_GROUND_TAXI_SPEED_TOLERANCE = 1.0d / 20.0d;
-    private static final double FAST_LANDING_GROUND_APPROACH_BRAKE_SPEED = 2.0d / 20.0d;
     private static final float AIRPLANE_GROUND_CLEAR_THROTTLE_INPUT = -1.0f;
     private static final float AIRPLANE_GROUND_ENGINE_CLEAR_THRESHOLD = 0.02f;
     private static final float FAST_DESCENT_AIRPLANE_PITCH = 1.0f;
@@ -227,15 +226,22 @@ public final class CruiseController {
     private static final Map<VehicleEntity, Boolean> MODE_SWITCH_REPORTED = new WeakHashMap<>();
     private static final Map<VehicleEntity, BoostSyncState> LAST_CLIENT_BOOST_SYNC = new WeakHashMap<>();
     /**
-     * Landing diagnostics (developer switch {@link CruiseDebug#LANDING}): per-side sample counters and last
-     * force-descent state. Index 0 is the client side, index 1 the server side, so one side can never starve the
-     * other's sampling.
+     * Landing diagnostics (developer switch {@link CruiseDebug#LANDING}): per-side sample counters, last
+     * force-descent state and last ground contact. Index 0 is the client side, index 1 the server side, so one side
+     * can never starve the other's sampling.
      */
     private static final int LANDING_DIAG_INTERVAL_TICKS = 5;
     private static final int LANDING_DIAG_CLIENT_SIDE = 0;
     private static final int LANDING_DIAG_SERVER_SIDE = 1;
     private static final Map<VehicleEntity, int[]> LANDING_DIAG_TICKS = new WeakHashMap<>();
     private static final Map<VehicleEntity, Boolean[]> LANDING_DIAG_FORCE = new WeakHashMap<>();
+    /**
+     * Landing diagnostics: newest airborne plan per aircraft and the per-side "was on the ground last tick" flag.
+     * The plan is what the roll-out model aims the touch-down at, so keeping it lets the single {@code touchdown}
+     * line carry both sides of the comparison - the roll the plan expected and the roll the aircraft performs.
+     */
+    private static final Map<VehicleEntity, FastLandingPlan> LANDING_DIAG_LAST_PLAN = new WeakHashMap<>();
+    private static final Map<VehicleEntity, Boolean[]> LANDING_DIAG_GROUND = new WeakHashMap<>();
 
     private record LAlignmentPlan(int stage, boolean firstAxis, float targetYaw,
                                   boolean axisOnly, double initialLateralError) {
@@ -1674,6 +1680,9 @@ public final class CruiseController {
 
         float yawError = yawError(vehicle.getYRot(), dx, dz);
         if (vehicle instanceof AirplaneEntity) {
+            // Touch-down is the joint the roll-out model is judged on, so it gets its own line before the
+            // completion test, the ground routine or the brake can change what the aircraft is doing.
+            noteLandingGroundState(vehicle, route, vehicle.onGround());
             // The landing test comes first on every tick: an aircraft already inside the tolerance is done, even if
             // the ground or brake logic still had something queued for this tick.
             if (isFastLandingReadyForPostBrake(vehicle, landingTarget.x(), landingTarget.z(),
@@ -1705,6 +1714,10 @@ public final class CruiseController {
         }
 
         FastLandingPlan plan = fastLandingPlan(vehicle, horizontalDistance, altitudeError, landingHorizontalRadius);
+        if (CruiseDebug.landingEnabled()) {
+            // Remember the newest airborne plan for the touch-down line; it is the roll-out this approach aims for.
+            LANDING_DIAG_LAST_PLAN.put(vehicle, plan);
+        }
         // The approach is flown to the touch-down point, which sits the roll-out short of the landing
         // point, so every airborne distance is measured against the target minus that lead.
         boolean descentWasActive = LANDING_ACTIVE.containsKey(vehicle);
@@ -2020,6 +2033,8 @@ public final class CruiseController {
         MODE_SWITCH_REPORTED.remove(vehicle);
         LANDING_DIAG_TICKS.remove(vehicle);
         LANDING_DIAG_FORCE.remove(vehicle);
+        LANDING_DIAG_LAST_PLAN.remove(vehicle);
+        LANDING_DIAG_GROUND.remove(vehicle);
     }
 
     private static double brakingDecay(VehicleEntity vehicle) {
@@ -2188,6 +2203,12 @@ public final class CruiseController {
      * #airplaneGroundReverseTurnInput} - while it is behind. It never turns around to fix an overshoot; steering is
      * deliberately absent once the target reference has crossed over, because the completion test only needs distance,
      * speed and ground contact, never a heading.</p>
+     *
+     * <p>The roll-out is one fully braked exponential until the aircraft is no longer rolling (the same speed the
+     * completion test asks for), because that is the roll the plan predicted from its {@code lead}. Releasing the
+     * brake earlier - the old {@code 2 blocks/s} gate - made the aircraft coast well past the modelled exponential
+     * and stopped it somewhere past the landing point, which is why the near-field drive-in below is left as the
+     * fallback for a roll that stopped outside the completion radius rather than as a routine part of every roll.</p>
      */
     private static void tickAirplaneGroundRollout(VehicleEntity vehicle, CruiseRoute route, float yawError,
                                                   double horizontalDistance, double dx, double dz) {
@@ -2203,7 +2224,7 @@ public final class CruiseController {
         float forwardInput = 0.0f;
         if (groundBrakeZone || horizontalDistance <= FAST_LANDING_GROUND_APPROACH_RADIUS
                 && (!isAirplaneGroundEngineCleared(vehicle)
-                || horizontalSpeed(vehicle) > FAST_LANDING_GROUND_APPROACH_BRAKE_SPEED)) {
+                || horizontalSpeed(vehicle) > FAST_LANDING_POST_BRAKE_STOP_SPEED)) {
             throttleInput = AIRPLANE_GROUND_CLEAR_THROTTLE_INPUT;
         } else if (!groundBrakeZone) {
             if (horizontalDistance <= FAST_LANDING_GROUND_APPROACH_RADIUS) {
@@ -2425,7 +2446,7 @@ public final class CruiseController {
                 && horizontalDistance <= descentDistance + touchdownLead + FAST_LANDING_DESCENT_BUFFER;
         boolean brake = horizontalDistance <= stopDistance + touchdownLead + FAST_LANDING_BRAKE_BUFFER;
         return new FastLandingPlan(descend, brake, rawDescent, descentDistance, stopDistance, stopTicks,
-                touchdownLead, boostTarget);
+                touchdownLead, stopEstimate.contactSpeed(), boostTarget);
     }
 
     private static boolean shouldForceDescent(FastLandingPlan plan, FlareEstimate flareEstimate) {
@@ -2582,15 +2603,58 @@ public final class CruiseController {
      * it comes to rest, not the point where it first touches the ground: the approach is flown
      * {@code lead} blocks short of the landing point and the roll-out spends that distance arriving
      * on it. Without it the aircraft crosses the target still flying, rolls past, and the ground loop
-     * has to taxi back. The roll comes from the same braking model the stop estimate uses.
+     * has to taxi back.
+     *
+     * <p>The roll is integrated tick by tick with the decay the aircraft really has on the ground (see
+     * {@link #groundRollDecay}), starting from the speed the stop estimate expects at touch-down. The previous closed
+     * form used the <em>air</em> friction blend ({@code brakeFactor * (1 - FRICTION) * HORIZONTAL_DECAY} = 0.9077),
+     * one to two percent per tick away from the real ground decay; the roll length is {@code f / (1 - f)}, so that
+     * small difference was ten to thirty percent of the roll - the approach was aimed that far short of the landing
+     * point, and the aircraft then stopped short of it.</p>
      */
     private static double touchdownRollDistance(VehicleEntity vehicle, double touchdownSpeed) {
         if (!(vehicle instanceof AirplaneEntity) || touchdownSpeed <= 0.0d) {
             return 0.0d;
         }
-        double factor = brakingDecay(vehicle);
-        return touchdownSpeed * factor / Math.max(0.005d, 1.0d - factor)
-                + touchdownSpeed * FAST_LANDING_BRAKE_RESPONSE_TICKS;
+        double speed = touchdownSpeed;
+        double distance = 0.0d;
+        for (int tick = 0; tick < FAST_LANDING_BRAKE_SIMULATION_TICKS
+                && speed > FAST_LANDING_GROUND_STOP_SPEED; tick++) {
+            speed *= groundRollDecay(vehicle, speed);
+            distance += speed;
+        }
+        return distance;
+    }
+
+    /**
+     * Per-tick horizontal decay of a rolling conventional aircraft, mirroring Immersive Aircraft's ground path:
+     * {@code InventoryVehicleEntity.applyFriction} switches from {@code FRICTION} to {@code GROUND_FRICTION} on the
+     * ground, {@code AircraftEntity.getGroundDecay} lifts that by the aircraft's own gravity share and by its
+     * acceleration upgrade, and {@code AirplaneEntity.updateController} scales the velocity by the brake factor while
+     * the brake input is held. The engine is cut for the whole roll, which is the state the gravity share is read at.
+     */
+    private static double groundRollDecay(VehicleEntity vehicle, double speed) {
+        double factor = brakingFactor(vehicle);
+        if (vehicle instanceof InventoryVehicleEntity inventoryVehicle) {
+            double groundFriction = Mth.clamp(inventoryVehicle.getProperties().get(VehicleStat.GROUND_FRICTION), 0.0f, 1.0f);
+            double gravityShare = Mth.clamp(groundGravityShare(vehicle, speed), 0.0d, 1.0d);
+            double upgrade = Mth.clamp(inventoryVehicle.getProperties().get(VehicleStat.ACCELERATION) * 0.5d, 0.0d, 1.0d);
+            double groundDecay = (groundFriction * gravityShare + (1.0d - gravityShare)) * (1.0d - upgrade) + upgrade;
+            factor *= Mth.clamp(inventoryVehicle.getProperties().get(VehicleStat.HORIZONTAL_DECAY), 0.0d, 1.0d) * groundDecay;
+        }
+        return Mth.clamp(factor, 0.01d, 0.999d);
+    }
+
+    /**
+     * Immersive Aircraft's gravity share for a level, engine-off roll: {@code -getGravity() / 0.04}, i.e. the
+     * {@code max(0, 1 - 1.5 * speed)} term of {@code AirplaneEntity.getGravity}. It is read through
+     * {@link #simulatedAirplaneGravity} so the aircraft's own gravity overrides (the bamboo hopper scales it by engine
+     * power, which is zero once the landing has cleared the throttle) stay in exactly one place.
+     */
+    private static double groundGravityShare(VehicleEntity vehicle, double speed) {
+        Vec3 levelRoll = new Vec3(speed, 0.0d, 0.0d);
+        Vec3 levelForward = new Vec3(0.0d, 0.0d, 1.0d);
+        return -simulatedAirplaneGravity(vehicle, levelRoll, levelForward, 0.0d) / 0.04d;
     }
 
     private static StopEstimate simulatedAirplaneStoppingEstimate(VehicleEntity vehicle, EngineVehicle engineVehicle,
@@ -3126,7 +3190,7 @@ public final class CruiseController {
         Vec3 velocity = vehicle.getDeltaMovement();
         CruiseDebug.landing(ImmersiveAircraftCruise.LOGGER,
                 "[CruiseLanding] side={} phase={} v={} load={} land={} stage={} tgt={} surf={} planeY={} pilotY={} "
-                        + "contactY={} altErr={} distPlane={} distRef={} xz={}/{} hv={} vv={} onGround={} pitch={} "
+                        + "contactY={} altErr={} distPlane={} distRef={} xz={}/{} hv={} vv={} onGround={} pitch={} yaw={} yawErr={} "
                         + "in={}/{}/{} descend={} brake={} force={} permit={} boostReq={} gateBrake={} {}",
                 vehicle.level().isClientSide() ? "C" : "S",
                 phase,
@@ -3148,6 +3212,8 @@ public final class CruiseController {
                 landingFormat(velocity.y * 20.0d),
                 vehicle.onGround(),
                 landingFormat(vehicle.getXRot()),
+                landingFormat(vehicle.getYRot()),
+                landingFormat(yawToTarget(vehicle, landingTarget, reference)),
                 landingFormat(vehicle.pressingInterpolatedX.getSmooth()),
                 landingFormat(vehicle.pressingInterpolatedY.getSmooth()),
                 landingFormat(vehicle.pressingInterpolatedZ.getSmooth()),
@@ -3162,6 +3228,37 @@ public final class CruiseController {
 
     private static int landingDiagnosticSide(VehicleEntity vehicle) {
         return vehicle.level().isClientSide() ? LANDING_DIAG_CLIENT_SIDE : LANDING_DIAG_SERVER_SIDE;
+    }
+
+    /** Heading error towards the landing target in degrees, or NaN when there is no target to measure against. */
+    private static double yawToTarget(VehicleEntity vehicle, LandingTarget landingTarget, Vec3 reference) {
+        if (landingTarget == null) {
+            return Double.NaN;
+        }
+        return yawError(vehicle.getYRot(), landingTarget.x() - reference.x, landingTarget.z() - reference.z);
+    }
+
+    /**
+     * Emits the single {@code touchdown} line the first time each side sees the aircraft on the ground while the
+     * landing sequence is considering it. The line carries the newest airborne plan, so one row holds both halves of
+     * the roll-out comparison: the distance the plan aimed the touch-down short of the target ({@code lead}, built
+     * from the predicted touch-down speed {@code cs}) and the state the aircraft really touched down in
+     * ({@code distRef}/{@code distPlane}/{@code hv}). It resets whenever the aircraft is airborne again, so a
+     * take-off and re-landing inside one approach logs a second touch-down.
+     */
+    private static void noteLandingGroundState(VehicleEntity vehicle, CruiseRoute route, boolean onGround) {
+        if (!CruiseDebug.landingEnabled()) {
+            return;
+        }
+        Boolean[] previous = LANDING_DIAG_GROUND.computeIfAbsent(vehicle, key -> new Boolean[2]);
+        int side = landingDiagnosticSide(vehicle);
+        if (Objects.equals(previous[side], onGround)) {
+            return;
+        }
+        previous[side] = onGround;
+        if (onGround) {
+            logLandingDiagnostics(vehicle, route, "touchdown", true, LANDING_DIAG_LAST_PLAN.get(vehicle), null, false);
+        }
     }
 
     /** True when this call is the first one to see the new force-descent state for that side of the aircraft. */
@@ -3189,6 +3286,7 @@ public final class CruiseController {
         return "plan=raw" + landingFormat(plan.rawDescent())
                 + "/dDist" + landingFormat(plan.descentDistance())
                 + "/lead" + landingFormat(plan.touchdownLead())
+                + "/cs" + landingFormat(plan.contactSpeed())
                 + "/sDist" + landingFormat(plan.stopDistance())
                 + "/bt" + landingFormat(plan.boostTarget())
                 + (flare == null ? "" : "/flare" + landingFormat(flare.descent()));
@@ -3355,8 +3453,14 @@ public final class CruiseController {
         return Mth.clamp((float) ((ratio - 0.5d) / 0.5d), FAST_LANDING_MIN_CRUISE_BOOST, 1.0f);
     }
 
+    /**
+     * {@code contactSpeed} is the speed the stop estimate expects at touch-down; {@code touchdownLead} is derived
+     * from it, so the landing log prints both to separate a mispredicted touch-down speed from a mispredicted
+     * roll-out.
+     */
     private record FastLandingPlan(boolean descend, boolean brake, double rawDescent, double descentDistance,
-                                   double stopDistance, double stopTicks, double touchdownLead, float boostTarget) {
+                                   double stopDistance, double stopTicks, double touchdownLead, double contactSpeed,
+                                   float boostTarget) {
     }
 
     private record RotorcraftLandingPlan(boolean descend, boolean brake, double descent, double descentTicks,

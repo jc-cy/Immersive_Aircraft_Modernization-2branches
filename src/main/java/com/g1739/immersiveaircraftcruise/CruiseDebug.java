@@ -11,7 +11,7 @@ import org.slf4j.Logger;
  */
 public final class CruiseDebug {
     /** Temporary developer switch. Set false before producing a clean release jar. */
-    public static final boolean ENABLED = true;
+    public static final boolean ENABLED = false;
 
     /**
      * Landing diagnostics switch (temporary developer switch, high volume).
@@ -19,7 +19,7 @@ public final class CruiseDebug {
      * <p>Kept separate from {@link #ENABLED} so a landing investigation can read only the landing lines instead of
      * the chunk/route flood. Set both back to {@code false} before producing a clean release jar.</p>
      */
-    public static final boolean LANDING = true;
+    public static final boolean LANDING = false;
 
     private CruiseDebug() {
     }
