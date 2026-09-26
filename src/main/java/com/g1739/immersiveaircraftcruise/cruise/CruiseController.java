@@ -104,10 +104,10 @@ public final class CruiseController {
     private static final double FAST_LANDING_DESCENT_BUFFER = 100.0;
     private static final double FAST_LANDING_BRAKE_BUFFER = 0.0;
     private static final double FAST_LANDING_BRAKE_RESPONSE_TICKS = 1.0;
-    private static final int FAST_LANDING_BRAKE_SIMULATION_TICKS = 120;
-    private static final double AIRPLANE_INPUT_INTERPOLATION_STEP = 0.1d;
     private static final int FAST_LANDING_FLARE_SIMULATION_TICKS = 80;
     private static final double FAST_LANDING_FLARE_VERTICAL_SPEED = 0.08;
+    private static final int FAST_LANDING_BRAKE_SIMULATION_TICKS = 120;
+    private static final double AIRPLANE_INPUT_INTERPOLATION_STEP = 0.1d;
     private static final double FAST_LANDING_BRAKE_PLATEAU_DELTA = 0.003;
     private static final int FAST_LANDING_BRAKE_PLATEAU_TICKS = 8;
     private static final double FAST_LANDING_GROUND_STOP_SPEED = 0.01;
@@ -176,6 +176,15 @@ public final class CruiseController {
     private static final float ALTITUDE_CONTROL_RANGE = 44.0f;
     private static final float ALTITUDE_MAX_INPUT = 0.75f;
     private static final float ALTITUDE_SMOOTHING = 0.18f;
+    /**
+     * Landing flare resolution. The cruise range turns the last half block of a landing into a 1%
+     * input, which the input smoothing and the stabiliser swallow, and the cruise dead zone stops the
+     * controller altogether within five blocks of the target - both are fine for holding a cruise
+     * altitude and useless for putting the wheels on a block. The landing keeps the same law with a
+     * range and dead zone small enough to still act on the last fraction of a block.
+     */
+    private static final float LANDING_ALTITUDE_CONTROL_RANGE = 4.0f;
+    private static final float LANDING_ALTITUDE_DEAD_ZONE = 0.1f;
     private static final float BOOST_RISE_PER_TICK = 0.08f;
     private static final float BOOST_FALL_PER_TICK = 0.06f;
     private static final int HUD_SYNC_INTERVAL_TICKS = 5;
@@ -527,7 +536,7 @@ public final class CruiseController {
                 && MODE_SWITCH_REPORTED.put(vehicle, Boolean.TRUE) == null) {
             // Handing the aircraft to the straight-line mode has to drop the L heading lock with it.
             releaseLDirectionLock(vehicle);
-            ImmersiveAircraftCruise.LOGGER.info(
+            CruiseDebug.info(ImmersiveAircraftCruise.LOGGER, 
                     "[CruiseHandoff] L -> straight-line mode: vehicle={}, distance={}, radius={}, "
                             + "altitudeError={}, speed={}, landingMode={}",
                     vehicle.getId(), Math.round(actualDistance), Math.round(modeSwitchRadius),
@@ -1557,8 +1566,8 @@ public final class CruiseController {
         }
         FastLandingPlan plan = fastLandingPlan(vehicle, horizontalDistance, altitudeError,
                 landingHorizontalRadius(vehicle, FAST_LANDING_HORIZONTAL_RADIUS));
-        double descentReach = plan.descentDistance() + FAST_LANDING_DESCENT_BUFFER;
-        double stopReach = plan.stopDistance() + FAST_LANDING_BRAKE_BUFFER;
+        double descentReach = plan.descentDistance() + plan.touchdownLead() + FAST_LANDING_DESCENT_BUFFER;
+        double stopReach = plan.stopDistance() + plan.touchdownLead() + FAST_LANDING_BRAKE_BUFFER;
         return Math.max(CruiseRoute.L_FINAL_LANDING_HANDOFF_DISTANCE, Math.max(descentReach, stopReach));
     }
 
@@ -1696,6 +1705,8 @@ public final class CruiseController {
         }
 
         FastLandingPlan plan = fastLandingPlan(vehicle, horizontalDistance, altitudeError, landingHorizontalRadius);
+        // The approach is flown to the touch-down point, which sits the roll-out short of the landing
+        // point, so every airborne distance is measured against the target minus that lead.
         boolean descentWasActive = LANDING_ACTIVE.containsKey(vehicle);
         boolean brakeWasActive = FAST_LANDING_FINAL_BRAKE_ACTIVE.containsKey(vehicle);
         boolean descentCommitted = descentWasActive || plan.descend();
@@ -1728,7 +1739,12 @@ public final class CruiseController {
                     forceDescent);
         }
         double controlAltitudeError = descentCommitted ? altitudeError : route.getTargetAltitude() - vehicle.getY();
-        float climbInput = forceDescent ? 0.0f : altitudeInput(vehicle, controlAltitudeError);
+        float climbInput = 0.0f;
+        if (!forceDescent) {
+            double remainingLandingDistance = Math.max(0.0d, horizontalDistance - landingHorizontalRadius);
+            climbInput = landingAltitudeInput(vehicle, controlAltitudeError,
+                    landingAltitudeLookahead(remainingLandingDistance, horizontalSpeed(vehicle)));
+        }
         float boostTarget = activelyReducingSpeed ? 0.0f : plan.boostTarget();
         if (activelyReducingSpeed) {
             stopBoostingImmediately(vehicle, access);
@@ -2390,27 +2406,26 @@ public final class CruiseController {
         double descent = Math.max(0.0d, rawDescent - FAST_LANDING_PLAN_ALTITUDE_RADIUS);
         double currentSpeed = horizontalSpeed(vehicle);
         StopEstimate stopEstimate = stoppingEstimate(vehicle, rawDescent);
-        double activeDescent = descent;
-        double availableDescentDistance = Math.max(0.0d, horizontalDistance - horizontalRadius);
+        double touchdownLead = touchdownRollDistance(vehicle, stopEstimate.contactSpeed());
+        double availableDescentDistance = Math.max(0.0d, horizontalDistance - touchdownLead - horizontalRadius);
         boolean accelerationPermitted = accelerationPermit(vehicle);
         boolean positivePowerMode = cruiseMode(vehicle).powerBonus() > 0.0f;
         float boostTarget = positivePowerMode && !accelerationPermitted ? 0.0f : 1.0f;
-        DescentEstimate descentEstimate = descentEstimate(vehicle, activeDescent, boostTarget);
+        DescentEstimate descentEstimate = descentEstimate(vehicle, descent, boostTarget);
         if (positivePowerMode && accelerationPermitted) {
             for (int iteration = 0; iteration < 3; iteration++) {
-                boostTarget = fastLandingBoostTarget(availableDescentDistance, currentSpeed, activeDescent, descentEstimate.ticks());
-                descentEstimate = descentEstimate(vehicle, activeDescent, boostTarget);
+                boostTarget = fastLandingBoostTarget(availableDescentDistance, currentSpeed, descent, descentEstimate.ticks());
+                descentEstimate = descentEstimate(vehicle, descent, boostTarget);
             }
         }
-        double descentRate = descentEstimate.rate();
-        double descentTime = descentEstimate.ticks();
         double descentDistance = descentEstimate.distance();
         double stopDistance = stopEstimate.distance();
         double stopTicks = stopEstimate.ticks();
-        boolean descend = descent > 0.0d && horizontalDistance <= descentDistance + FAST_LANDING_DESCENT_BUFFER;
-        boolean brake = horizontalDistance <= stopDistance + FAST_LANDING_BRAKE_BUFFER;
-        return new FastLandingPlan(descend, brake, currentSpeed, rawDescent, descent, activeDescent, descentRate, descentTime,
-                descentDistance, stopDistance, stopTicks, stopEstimate.descent(), boostTarget);
+        boolean descend = descent > 0.0d
+                && horizontalDistance <= descentDistance + touchdownLead + FAST_LANDING_DESCENT_BUFFER;
+        boolean brake = horizontalDistance <= stopDistance + touchdownLead + FAST_LANDING_BRAKE_BUFFER;
+        return new FastLandingPlan(descend, brake, rawDescent, descentDistance, stopDistance, stopTicks,
+                touchdownLead, boostTarget);
     }
 
     private static boolean shouldForceDescent(FastLandingPlan plan, FlareEstimate flareEstimate) {
@@ -2531,7 +2546,8 @@ public final class CruiseController {
             contactOffset = nextContactOffset;
             enginePower = enginePower + ((braking ? engineTarget : 1.0d) - enginePower) * engineStep;
             boostLevel = nextPredictedBoostLevel(boostLevel, braking ? 0.0d : targetBoostLevel);
-            double targetAltitudeInput = simulatedAltitudeInput(-(targetDescent - dropped), velocity.y);
+            double targetAltitudeInput = simulatedLandingAltitudeInput(-(targetDescent - dropped), velocity.y,
+                    landingAltitudeLookahead(horizontalWindow - distance, horizontalLength(velocity)));
             altitudeMemory = simulatedSmoothedAltitudeInput(altitudeMemory, targetAltitudeInput);
             double targetPitchInput = -altitudeMemory;
             pitchInput = pitchInput + (targetPitchInput - pitchInput) * AIRPLANE_INPUT_INTERPOLATION_STEP;
@@ -2539,6 +2555,8 @@ public final class CruiseController {
 
         return new FlareEstimate(Math.min(dropped, targetDescent), distance);
     }
+
+
 
     private static double airplaneInputDecay(double friction, InventoryVehicleEntity inventoryVehicle) {
         double decay = Mth.clamp(1.0d - friction, 0.0d, 1.0d);
@@ -2549,21 +2567,37 @@ public final class CruiseController {
     private static StopEstimate geometricStoppingEstimate(VehicleEntity vehicle) {
         double speed = horizontalSpeed(vehicle);
         if (speed <= FAST_LANDING_GROUND_STOP_SPEED) {
-            return new StopEstimate(0.0d, 0.0d, 0.0d);
+            return new StopEstimate(0.0d, 0.0d, 0.0d, 0.0d);
         }
         double factor = brakingDecay(vehicle);
         double distance = speed * factor / Math.max(0.005d, 1.0d - factor);
         distance += speed * FAST_LANDING_BRAKE_RESPONSE_TICKS;
         double ticks = Mth.clamp(Math.log(FAST_LANDING_GROUND_STOP_SPEED / speed) / Math.log(factor), 1.0d, 200.0d);
         double descent = Math.max(0.0d, -vehicle.getDeltaMovement().y) * ticks;
-        return new StopEstimate(Math.max(0.0d, distance), ticks, descent);
+        return new StopEstimate(Math.max(0.0d, distance), ticks, descent, 0.0d);
+    }
+
+    /**
+     * The wheels keep rolling after touch-down. A landing has to aim the aircraft at the point where
+     * it comes to rest, not the point where it first touches the ground: the approach is flown
+     * {@code lead} blocks short of the landing point and the roll-out spends that distance arriving
+     * on it. Without it the aircraft crosses the target still flying, rolls past, and the ground loop
+     * has to taxi back. The roll comes from the same braking model the stop estimate uses.
+     */
+    private static double touchdownRollDistance(VehicleEntity vehicle, double touchdownSpeed) {
+        if (!(vehicle instanceof AirplaneEntity) || touchdownSpeed <= 0.0d) {
+            return 0.0d;
+        }
+        double factor = brakingDecay(vehicle);
+        return touchdownSpeed * factor / Math.max(0.005d, 1.0d - factor)
+                + touchdownSpeed * FAST_LANDING_BRAKE_RESPONSE_TICKS;
     }
 
     private static StopEstimate simulatedAirplaneStoppingEstimate(VehicleEntity vehicle, EngineVehicle engineVehicle,
                                                                   InventoryVehicleEntity inventoryVehicle, double targetDescent) {
         double initialSpeed = horizontalSpeed(vehicle);
         if (initialSpeed <= FAST_LANDING_GROUND_STOP_SPEED) {
-            return new StopEstimate(0.0d, 0.0d, 0.0d);
+            return new StopEstimate(0.0d, 0.0d, 0.0d, 0.0d);
         }
 
         Vec3 forward = vehicle.toVec3d(vehicle.getForwardDirection());
@@ -2640,7 +2674,7 @@ public final class CruiseController {
                 if (stepRatio < 1.0d || remainingDescent <= 0.0d) {
                     double ticks = Math.max(1.0d, tick - 1.0d + stepRatio);
                     return new StopEstimate(Math.max(0.0d, distance), ticks,
-                            Math.min(Math.max(0.0d, dropped), targetDescent));
+                            Math.min(Math.max(0.0d, dropped), targetDescent), speed);
                 }
             } else {
                 distance += speed;
@@ -2657,7 +2691,7 @@ public final class CruiseController {
                 plateauTicks++;
             }
             if (plateauTicks >= FAST_LANDING_BRAKE_PLATEAU_TICKS) {
-                return airBrakeEstimate(bestDistance, bestTicks, bestDropped, targetDescent);
+                return airBrakeEstimate(bestDistance, bestTicks, bestDropped, targetDescent, bestSpeed);
             }
 
             enginePower = enginePower + (engineTarget - enginePower) * engineStep;
@@ -2668,11 +2702,15 @@ public final class CruiseController {
             pitchInput = pitchInput + (targetPitchInput - pitchInput) * AIRPLANE_INPUT_INTERPOLATION_STEP;
         }
 
-        return bestDistance > 0.0d ? airBrakeEstimate(bestDistance, bestTicks, bestDropped, targetDescent) : geometricStoppingEstimate(vehicle);
+        return bestDistance > 0.0d
+                ? airBrakeEstimate(bestDistance, bestTicks, bestDropped, targetDescent, bestSpeed)
+                : geometricStoppingEstimate(vehicle);
     }
 
-    private static StopEstimate airBrakeEstimate(double distance, double ticks, double descent, double targetDescent) {
-        return new StopEstimate(Math.max(0.0d, distance), Math.max(1.0d, ticks), Math.min(Math.max(0.0d, descent), targetDescent));
+    private static StopEstimate airBrakeEstimate(double distance, double ticks, double descent, double targetDescent,
+                                                 double contactSpeed) {
+        return new StopEstimate(Math.max(0.0d, distance), Math.max(1.0d, ticks),
+                Math.min(Math.max(0.0d, descent), targetDescent), Math.max(0.0d, contactSpeed));
     }
 
     private static DescentEstimate descentEstimate(VehicleEntity vehicle, double descent, float targetBoostLevel) {
@@ -2888,11 +2926,43 @@ public final class CruiseController {
     }
 
     private static float simulatedAltitudeInput(double altitudeError, double verticalSpeed) {
-        double predictedError = altitudeError - verticalSpeed * ALTITUDE_LOOKAHEAD_TICKS;
-        if (Math.abs(altitudeError) <= ALTITUDE_DEAD_ZONE && Math.abs(verticalSpeed) <= ALTITUDE_RATE_DEAD_ZONE) {
+        return simulatedAltitudeInput(altitudeError, verticalSpeed, ALTITUDE_LOOKAHEAD_TICKS,
+                ALTITUDE_CONTROL_RANGE, ALTITUDE_DEAD_ZONE, ALTITUDE_MAX_INPUT);
+    }
+
+    /**
+     * The landing flare: the same law the cruise altitude hold uses, run on the landing range/dead
+     * zone. Every place that predicts or applies the flare - the controller and the flare estimate -
+     * goes through here, so the plan keeps modelling exactly what the controller will do.
+     */
+    private static float simulatedLandingAltitudeInput(double altitudeError, double verticalSpeed,
+                                                       double lookaheadTicks) {
+        return simulatedAltitudeInput(altitudeError, verticalSpeed, lookaheadTicks,
+                LANDING_ALTITUDE_CONTROL_RANGE, LANDING_ALTITUDE_DEAD_ZONE, ALTITUDE_MAX_INPUT);
+    }
+
+    private static float simulatedAltitudeInput(double altitudeError, double verticalSpeed, double lookaheadTicks,
+                                                float controlRange, float deadZone, float maxInput) {
+        double predictedError = altitudeError - verticalSpeed * lookaheadTicks;
+        if (Math.abs(altitudeError) <= deadZone && Math.abs(verticalSpeed) <= ALTITUDE_RATE_DEAD_ZONE) {
             return 0.0f;
         }
-        return Mth.clamp((float) (predictedError / ALTITUDE_CONTROL_RANGE), -ALTITUDE_MAX_INPUT, ALTITUDE_MAX_INPUT);
+        return Mth.clamp((float) (predictedError / controlRange), -maxInput, maxInput);
+    }
+
+    /**
+     * Altitude lookahead for a landing, expressed as the time left before the aircraft reaches the
+     * landing point. A fixed window is a fixed <em>time</em>: at cruise speed it reaches a hundred
+     * blocks ahead, so the approach flattened out and crossed the target high, while a slow landing
+     * had less than the window left anyway. Bounding it by the remaining flight time lets the one
+     * altitude controller aim at the target from any approach speed instead of needing a second,
+     * slower path for fast arrivals.
+     */
+    private static double landingAltitudeLookahead(double horizontalDistance, double horizontalSpeed) {
+        if (horizontalSpeed <= 1.0E-5d) {
+            return ALTITUDE_LOOKAHEAD_TICKS;
+        }
+        return Mth.clamp(horizontalDistance / horizontalSpeed, 1.0d, ALTITUDE_LOOKAHEAD_TICKS);
     }
 
     private static double expectedDescentRate(VehicleEntity vehicle) {
@@ -3118,10 +3188,12 @@ public final class CruiseController {
         }
         return "plan=raw" + landingFormat(plan.rawDescent())
                 + "/dDist" + landingFormat(plan.descentDistance())
+                + "/lead" + landingFormat(plan.touchdownLead())
                 + "/sDist" + landingFormat(plan.stopDistance())
                 + "/bt" + landingFormat(plan.boostTarget())
                 + (flare == null ? "" : "/flare" + landingFormat(flare.descent()));
     }
+
 
     /** Y of the first air block above the highest motion-blocking block in the aircraft's own column, or "?" when unknown. */
     private static String groundSurfaceUnder(VehicleEntity vehicle) {
@@ -3283,20 +3355,18 @@ public final class CruiseController {
         return Mth.clamp((float) ((ratio - 0.5d) / 0.5d), FAST_LANDING_MIN_CRUISE_BOOST, 1.0f);
     }
 
-    private record FastLandingPlan(boolean descend, boolean brake, double currentSpeed, double rawDescent,
-                                   double descent, double activeDescent,
-                                   double descentRate, double descentTime, double descentDistance, double stopDistance,
-                                   double stopTicks, double stopDescent, float boostTarget) {
+    private record FastLandingPlan(boolean descend, boolean brake, double rawDescent, double descentDistance,
+                                   double stopDistance, double stopTicks, double touchdownLead, float boostTarget) {
     }
 
     private record RotorcraftLandingPlan(boolean descend, boolean brake, double descent, double descentTicks,
                                          double descentDistance, double stopDistance) {
     }
 
-    private record StopEstimate(double distance, double ticks, double descent) {
+    private record FlareEstimate(double descent, double distance) {
     }
 
-    private record FlareEstimate(double descent, double distance) {
+    private record StopEstimate(double distance, double ticks, double descent, double contactSpeed) {
     }
 
     private record DescentEstimate(double distance, double ticks, double rate) {
@@ -3445,6 +3515,13 @@ public final class CruiseController {
         return smoothedAltitudeInput(vehicle, targetInput);
     }
 
+    /** Landing variant of {@link #altitudeInput}: landing range and dead zone, horizon to the target. */
+    private static float landingAltitudeInput(VehicleEntity vehicle, double altitudeError, double lookaheadTicks) {
+        double verticalSpeed = vehicle.getDeltaMovement().y;
+        float targetInput = simulatedLandingAltitudeInput(altitudeError, verticalSpeed, lookaheadTicks);
+        return smoothedAltitudeInput(vehicle, targetInput);
+    }
+
     private static float smoothedAltitudeInput(VehicleEntity vehicle, float targetInput) {
         float previousInput = ALTITUDE_MEMORY.getOrDefault(vehicle, 0.0f);
         float smoothing = Math.signum(previousInput) == Math.signum(targetInput) ? ALTITUDE_SMOOTHING : ALTITUDE_SMOOTHING * 1.35f;
@@ -3466,7 +3543,6 @@ public final class CruiseController {
     private static void setCruiseInputs(VehicleEntity vehicle, float movementX, float movementY, float movementZ) {
         if (shouldApplyPreloadAccelerationBrake(vehicle)) {
             movementY = -1.0f;
-            movementZ = 0.0f;
         }
         if (movementY < -0.01f) {
             AUTO_BRAKE_INPUT.put(vehicle, true);
@@ -3479,6 +3555,10 @@ public final class CruiseController {
      * aircraft still needs a native brake input so it does not coast into the
      * first unloaded route slice. The original boost request remains intact and
      * is restored automatically once the ten-slice permit is acknowledged.
+     *
+     * <p>The permit reaches the throttle only. Attitude belongs to whichever controller is flying
+     * the aircraft - zeroing the pitch input here used to freeze a landing in whatever attitude it
+     * happened to hold, which turned a climb into six blocks of unshed altitude.
      */
     private static boolean shouldApplyPreloadAccelerationBrake(VehicleEntity vehicle) {
         if (!(vehicle instanceof AirplaneEntity)

@@ -1,5 +1,6 @@
 package com.g1739.immersiveaircraftcruise.client;
 
+import com.g1739.immersiveaircraftcruise.CruiseDebug;
 import com.g1739.immersiveaircraftcruise.ImmersiveAircraftCruise;
 import net.minecraft.client.multiplayer.ClientLevel;
 
@@ -47,7 +48,7 @@ public final class EmbeddiumRenderBridge {
         RENDERER_INSTANCE = rendererInstance;
         RENDER_SECTION_MANAGER = renderSectionManager;
         RENDER_SECTION_MANAGER_CHUNK_ADDED = renderSectionManagerChunkAdded;
-        ImmersiveAircraftCruise.LOGGER.info(
+        CruiseDebug.info(ImmersiveAircraftCruise.LOGGER, 
                 "[CruiseRender] Embeddium bridge {} (tracker={}, directSections={})",
                 rendererInstance != null && renderSectionManagerChunkAdded != null ? "available" : "unavailable",
                 trackerGet != null && trackerStatusAdded != null,
@@ -75,7 +76,7 @@ public final class EmbeddiumRenderBridge {
             }
             RENDER_SECTION_MANAGER_CHUNK_ADDED.invoke(sectionManager, chunkX, chunkZ);
             if (FIRST_DIRECT_SECTION.compareAndSet(false, true)) {
-                ImmersiveAircraftCruise.LOGGER.info(
+                CruiseDebug.info(ImmersiveAircraftCruise.LOGGER, 
                         "[CruiseRender] direct Embeddium section creation active at chunk={}/{}",
                         chunkX, chunkZ);
             }
