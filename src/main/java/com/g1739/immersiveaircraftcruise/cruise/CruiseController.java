@@ -30,6 +30,10 @@ import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.level.Level;
+import net.minecraft.world.level.chunk.ChunkAccess;
+import net.minecraft.world.level.chunk.ChunkStatus;
+import net.minecraft.world.level.levelgen.Heightmap;
 import net.minecraft.world.phys.Vec3;
 import net.minecraftforge.common.capabilities.ForgeCapabilities;
 import net.minecraftforge.common.MinecraftForge;
@@ -43,6 +47,7 @@ import org.joml.Vector3f;
 import java.util.Collections;
 import java.util.IdentityHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
@@ -139,8 +144,6 @@ public final class CruiseController {
      * for the same landing.
      */
     private static final double AIRPLANE_AIR_OVERSHOOT_TURN_RADIUS = 5.0;
-    private static final float AIRPLANE_GROUND_TURNAROUND_INPUT = 0.8f;
-    private static final float AIRPLANE_GROUND_TURN_INPUT = 0.8f;
     private static final float AIRPLANE_GROUND_REVERSE_YAW_DEAD_ZONE = 8.0f;
     private static final double AIRPLANE_GROUND_REVERSE_LATERAL_DEAD_ZONE = 0.75d;
     private static final float AIRPLANE_GROUND_REVERSE_TURN_MAX_INPUT = 0.45f;
@@ -214,6 +217,16 @@ public final class CruiseController {
     /** One report per approach, so the L-to-straight switch distance can be read back from a log. */
     private static final Map<VehicleEntity, Boolean> MODE_SWITCH_REPORTED = new WeakHashMap<>();
     private static final Map<VehicleEntity, BoostSyncState> LAST_CLIENT_BOOST_SYNC = new WeakHashMap<>();
+    /**
+     * Landing diagnostics (developer switch {@link CruiseDebug#LANDING}): per-side sample counters and last
+     * force-descent state. Index 0 is the client side, index 1 the server side, so one side can never starve the
+     * other's sampling.
+     */
+    private static final int LANDING_DIAG_INTERVAL_TICKS = 5;
+    private static final int LANDING_DIAG_CLIENT_SIDE = 0;
+    private static final int LANDING_DIAG_SERVER_SIDE = 1;
+    private static final Map<VehicleEntity, int[]> LANDING_DIAG_TICKS = new WeakHashMap<>();
+    private static final Map<VehicleEntity, Boolean[]> LANDING_DIAG_FORCE = new WeakHashMap<>();
 
     private record LAlignmentPlan(int stage, boolean firstAxis, float targetYaw,
                                   boolean axisOnly, double initialLateralError) {
@@ -1651,24 +1664,25 @@ public final class CruiseController {
         }
 
         float yawError = yawError(vehicle.getYRot(), dx, dz);
-        if (!LANDING_ACTIVE.containsKey(vehicle)
-                && !FAST_LANDING_FINAL_BRAKE_ACTIVE.containsKey(vehicle)
-                && vehicle instanceof AirplaneEntity
-                && vehicle.onGround()
-                && (horizontalDistance <= FAST_LANDING_GROUND_APPROACH_RADIUS
-                || altitudeError <= FAST_LANDING_COMPLETION_ALTITUDE_RADIUS)
-                && horizontalDistance <= FAST_LANDING_ALIGN_RADIUS) {
-            stopBoostingImmediately(vehicle, access);
-            if (handleNavigationHorizontalCollision(vehicle, access, route, clientSide)) {
-                return true;
-            }
+        if (vehicle instanceof AirplaneEntity) {
+            // The landing test comes first on every tick: an aircraft already inside the tolerance is done, even if
+            // the ground or brake logic still had something queued for this tick.
             if (isFastLandingReadyForPostBrake(vehicle, landingTarget.x(), landingTarget.z(),
                     landingTargetAltitude(vehicle, route))) {
                 beginPostLandingBrake(vehicle, access, route, clientSide);
                 return true;
             }
-            tickFastLandingGroundGuard(vehicle, yawError, horizontalDistance, dx, dz);
-            return true;
+            // One ground window for every ground case - close-range protection, the roll-out after touch-down and the
+            // ground part of the final brake alike. The vertical work is finished by then, so on the ground only this
+            // routine commands the aircraft.
+            if (vehicle.onGround() && horizontalDistance <= FAST_LANDING_ALIGN_RADIUS) {
+                stopBoostingImmediately(vehicle, access);
+                if (handleNavigationHorizontalCollision(vehicle, access, route, clientSide)) {
+                    return true;
+                }
+                tickAirplaneGroundRollout(vehicle, route, yawError, horizontalDistance, dx, dz);
+                return true;
+            }
         }
         if (!LANDING_ACTIVE.containsKey(vehicle)
                 && !FAST_LANDING_FINAL_BRAKE_ACTIVE.containsKey(vehicle)
@@ -1682,8 +1696,10 @@ public final class CruiseController {
         }
 
         FastLandingPlan plan = fastLandingPlan(vehicle, horizontalDistance, altitudeError, landingHorizontalRadius);
-        boolean descentCommitted = LANDING_ACTIVE.containsKey(vehicle) || plan.descend();
-        boolean finalBrake = FAST_LANDING_FINAL_BRAKE_ACTIVE.containsKey(vehicle) || plan.brake();
+        boolean descentWasActive = LANDING_ACTIVE.containsKey(vehicle);
+        boolean brakeWasActive = FAST_LANDING_FINAL_BRAKE_ACTIVE.containsKey(vehicle);
+        boolean descentCommitted = descentWasActive || plan.descend();
+        boolean finalBrake = brakeWasActive || plan.brake();
         boolean shouldLand = descentCommitted || finalBrake;
         if (!shouldLand) {
             return false;
@@ -1694,6 +1710,12 @@ public final class CruiseController {
         if (finalBrake) {
             FAST_LANDING_FINAL_BRAKE_ACTIVE.put(vehicle, true);
         }
+        if (!descentWasActive) {
+            logLandingDiagnostics(vehicle, route, "descent-commit", true, plan, null, false);
+        }
+        if (finalBrake && !brakeWasActive) {
+            logLandingDiagnostics(vehicle, route, "final-brake-start", true, plan, null, false);
+        }
 
         float turn = horizontalDistance > FAST_LANDING_TURN_RADIUS && !isAirTurnSuppressed(vehicle)
                 ? fastLandingTurnInput(vehicle, yawError, horizontalDistance) : 0.0f;
@@ -1701,6 +1723,10 @@ public final class CruiseController {
         FlareEstimate flareEstimate = flareEstimate(vehicle, finalBrake, plan.boostTarget(), horizontalDistance,
                 plan.stopTicks(), plan.rawDescent());
         boolean forceDescent = descentCommitted && shouldForceDescent(plan, flareEstimate);
+        if (landingForceFlipped(vehicle, forceDescent)) {
+            logLandingDiagnostics(vehicle, route, forceDescent ? "force-descent" : "flare", true, plan, flareEstimate,
+                    forceDescent);
+        }
         double controlAltitudeError = descentCommitted ? altitudeError : route.getTargetAltitude() - vehicle.getY();
         float climbInput = forceDescent ? 0.0f : altitudeInput(vehicle, controlAltitudeError);
         float boostTarget = activelyReducingSpeed ? 0.0f : plan.boostTarget();
@@ -1716,26 +1742,8 @@ public final class CruiseController {
             if (finalBrake && handleNavigationHorizontalCollision(vehicle, access, route, clientSide)) {
                 return true;
             }
-            boolean groundApproach = finalBrake && vehicle.onGround();
-            boolean groundBrakeZone = groundApproach && isAirplaneLandingBrakeZone(vehicle, horizontalDistance);
-            float forwardInput = groundApproach
-                    ? (groundBrakeZone ? 0.0f : airplaneGroundApproachInput(vehicle, dx, dz, horizontalDistance))
-                    : pitchInput;
-            float brakeInput = airplaneLandingBrakeInput(vehicle, finalBrake, horizontalDistance);
-            if (groundApproach && !groundBrakeZone && !isAirplaneGroundEngineCleared(vehicle)) {
-                brakeInput = AIRPLANE_GROUND_CLEAR_THROTTLE_INPUT;
-                forwardInput = 0.0f;
-            } else if (groundApproach && forwardInput < -0.01f) {
-                turn = airplaneGroundReverseTurnInput(yawError, horizontalDistance);
-            } else {
-                if (groundApproach && isAirplaneCapturedOvershoot(vehicle, horizontalDistance)) {
-                    turn = Mth.clamp(turn, -AIRPLANE_GROUND_TURN_INPUT, AIRPLANE_GROUND_TURN_INPUT);
-                }
-                if (groundApproach && isAirplaneWideOvershoot(vehicle, horizontalDistance)) {
-                    turn = Mth.clamp(turn, -AIRPLANE_GROUND_TURNAROUND_INPUT, AIRPLANE_GROUND_TURNAROUND_INPUT);
-                }
-            }
-            setCruiseInputs(vehicle, turn, brakeInput, forwardInput);
+            // Airborne only: a landed aircraft has already been handed to the ground routine this tick.
+            setCruiseInputs(vehicle, turn, finalBrake ? -1.0f : 0.0f, pitchInput);
         } else {
             float verticalInput = forceDescent ? FAST_DESCENT_VERTICAL_INPUT : climbInput;
             float forwardInput = horizontalDistance > landingHorizontalRadius ? (activelyReducingSpeed ? 0.0f : 1.0f) : 0.0f;
@@ -1750,6 +1758,8 @@ public final class CruiseController {
         if (finalBrake) {
             brakeForLanding(vehicle, horizontalDistance);
         }
+        logLandingDiagnostics(vehicle, route, finalBrake ? "final-brake" : "descent", false, plan, flareEstimate,
+                forceDescent);
 
         if (isFastLandingReadyForPostBrake(vehicle, landingTarget.x(), landingTarget.z(),
                 landingTargetAltitude(vehicle, route))) {
@@ -1821,6 +1831,7 @@ public final class CruiseController {
         POST_LANDING_BRAKE.put(vehicle, POST_LANDING_BRAKE_TICKS);
         LANDING_ACTIVE.put(vehicle, true);
         FAST_LANDING_FINAL_BRAKE_ACTIVE.remove(vehicle);
+        logLandingDiagnostics(vehicle, route, "post-brake-start", true, null, null, false);
         tickPostLandingBrake(vehicle, access, route, POST_LANDING_BRAKE_TICKS, clientSide);
     }
 
@@ -1847,6 +1858,7 @@ public final class CruiseController {
             engineVehicle.setEngineTarget(Math.max(0.0f, engineVehicle.getEngineTarget() - 0.1f));
         }
         POST_LANDING_BRAKE.put(vehicle, ticks - 1);
+        logLandingDiagnostics(vehicle, route, "post-brake", false, null, null, false);
     }
 
     private static boolean handleNavigationHorizontalCollision(VehicleEntity vehicle, CruiseVehicleAccess access,
@@ -1951,6 +1963,7 @@ public final class CruiseController {
     }
 
     private static void finishLanding(VehicleEntity vehicle, CruiseVehicleAccess access, CruiseRoute route, boolean clientSide) {
+        logLandingDiagnostics(vehicle, route, "finish", true, null, null, false);
         route.setCurrentIndex(route.getSelectedEntry().waypoints().size() - 1);
         route.setHoldingPattern(true);
         setCruiseInputs(vehicle, 0.0f, 0.0f, 0.0f);
@@ -1989,6 +2002,8 @@ public final class CruiseController {
         FAST_LANDING_AIR_TURN_STATE.remove(vehicle);
         POST_LANDING_STOPPED.remove(vehicle);
         MODE_SWITCH_REPORTED.remove(vehicle);
+        LANDING_DIAG_TICKS.remove(vehicle);
+        LANDING_DIAG_FORCE.remove(vehicle);
     }
 
     private static double brakingDecay(VehicleEntity vehicle) {
@@ -2122,10 +2137,6 @@ public final class CruiseController {
     }
 
     private static float airplaneGroundApproachInput(VehicleEntity vehicle, double dx, double dz, double horizontalDistance) {
-        if (Boolean.TRUE.equals(FAST_LANDING_PASSED_TARGET.get(vehicle))
-                && horizontalDistance > AIRPLANE_GROUND_APPROACH_CAPTURE_RADIUS) {
-            return AIRPLANE_GROUND_TURNAROUND_INPUT;
-        }
         Vec3 forward = forwardFromRotation(vehicle.getYRot(), 0.0d);
         forward = new Vec3(forward.x, 0.0d, forward.z);
         if (forward.lengthSqr() <= 1.0E-8d) {
@@ -2151,19 +2162,27 @@ public final class CruiseController {
         return -Math.signum(yawError) * input;
     }
 
-    private static float airplaneLandingBrakeInput(VehicleEntity vehicle, boolean finalBrake, double horizontalDistance) {
-        if (!finalBrake) {
-            return 0.0f;
-        }
-        return !vehicle.onGround() || isAirplaneLandingBrakeZone(vehicle, horizontalDistance) ? -1.0f : 0.0f;
-    }
-
-    private static void tickFastLandingGroundGuard(VehicleEntity vehicle, float yawError,
-                                                   double horizontalDistance, double dx, double dz) {
+    /**
+     * The single ground routine for conventional aircraft: close-range protection, the roll-out after touch-down and
+     * the ground part of the final brake all end up here, so ground handling has exactly one window to maintain.
+     *
+     * <p>The order follows the landing itself. The throttle is cleared first - an engine that is still pushing is
+     * never handed to the ground calibration. Inside the near field the aircraft simply drives at the target: forward
+     * while it is ahead, backwards - with the small flip-aware correction from {@link
+     * #airplaneGroundReverseTurnInput} - while it is behind. It never turns around to fix an overshoot; steering is
+     * deliberately absent once the target reference has crossed over, because the completion test only needs distance,
+     * speed and ground contact, never a heading.</p>
+     */
+    private static void tickAirplaneGroundRollout(VehicleEntity vehicle, CruiseRoute route, float yawError,
+                                                  double horizontalDistance, double dx, double dz) {
         updateFastLandingPassState(vehicle, dx, dz, horizontalDistance);
 
         boolean groundBrakeZone = isAirplaneLandingBrakeZone(vehicle, horizontalDistance);
-        float turn = horizontalDistance > FAST_LANDING_TURN_RADIUS ? fastLandingTurnInput(vehicle, yawError, horizontalDistance) : 0.0f;
+        // Arriving at the target ends the steering: the landing only has to stop there, and its completion test needs
+        // distance, speed and ground contact - never a heading. Every other ground case keeps the existing handling.
+        boolean alignmentZone = isAirplaneCapturedOvershoot(vehicle, horizontalDistance);
+        float turn = horizontalDistance > FAST_LANDING_TURN_RADIUS && !alignmentZone
+                ? fastLandingTurnInput(vehicle, yawError, horizontalDistance) : 0.0f;
         float throttleInput = 0.0f;
         float forwardInput = 0.0f;
         if (groundBrakeZone || horizontalDistance <= FAST_LANDING_GROUND_APPROACH_RADIUS
@@ -2175,10 +2194,6 @@ public final class CruiseController {
                 forwardInput = airplaneGroundApproachInput(vehicle, dx, dz, horizontalDistance);
                 if (forwardInput < -0.01f) {
                     turn = airplaneGroundReverseTurnInput(yawError, horizontalDistance);
-                } else if (isAirplaneCapturedOvershoot(vehicle, horizontalDistance)) {
-                    turn = Mth.clamp(turn, -AIRPLANE_GROUND_TURN_INPUT, AIRPLANE_GROUND_TURN_INPUT);
-                } else if (isAirplaneWideOvershoot(vehicle, horizontalDistance)) {
-                    turn = Mth.clamp(turn, -AIRPLANE_GROUND_TURNAROUND_INPUT, AIRPLANE_GROUND_TURNAROUND_INPUT);
                 }
             } else if (Math.abs(yawError) <= FAST_LANDING_GROUND_TAXI_YAW_LIMIT) {
                 throttleInput = airplaneGroundTaxiThrottleInput(vehicle);
@@ -2187,6 +2202,7 @@ public final class CruiseController {
         }
 
         setCruiseInputs(vehicle, turn, throttleInput, forwardInput);
+        logLandingDiagnostics(vehicle, route, "ground-rollout", false, null, null, false);
     }
 
     private static boolean tickFastLandingAlignGuard(VehicleEntity vehicle, float yawError, double horizontalDistance) {
@@ -2283,11 +2299,6 @@ public final class CruiseController {
     private static boolean isAirplaneCapturedOvershoot(VehicleEntity vehicle, double horizontalDistance) {
         return Boolean.TRUE.equals(FAST_LANDING_PASSED_TARGET.get(vehicle))
                 && horizontalDistance <= AIRPLANE_GROUND_APPROACH_CAPTURE_RADIUS;
-    }
-
-    private static boolean isAirplaneWideOvershoot(VehicleEntity vehicle, double horizontalDistance) {
-        return Boolean.TRUE.equals(FAST_LANDING_PASSED_TARGET.get(vehicle))
-                && horizontalDistance > AIRPLANE_GROUND_APPROACH_CAPTURE_RADIUS;
     }
 
     private static double dotHorizontal(Vec3 a, Vec3 b) {
@@ -3008,6 +3019,129 @@ public final class CruiseController {
     }
 
     /**
+     * Landing diagnostics for the developer switch {@link CruiseDebug#LANDING}.
+     *
+     * <p>Prints one compact line per phase change ({@code urgent}) plus a periodic sample while the landing sequence
+     * owns the aircraft. The line carries everything a landing precision investigation needs to read straight out of
+     * the log: the configured landing altitude, the aircraft's own landing reference ({@code planeY}/{@code contactY})
+     * next to the rider's Y, the real block surface under the aircraft, the horizontal distances to the landing
+     * target, the vertical rate, the interpolated inputs actually applied this tick and the plan the controller is
+     * following. Logging only - it never changes control flow.</p>
+     */
+    private static void logLandingDiagnostics(VehicleEntity vehicle, CruiseRoute route, String phase, boolean urgent,
+                                              FastLandingPlan plan, FlareEstimate flare, boolean forceDescent) {
+        if (!CruiseDebug.landingEnabled()) {
+            return;
+        }
+        int side = landingDiagnosticSide(vehicle);
+        int[] counters = LANDING_DIAG_TICKS.computeIfAbsent(vehicle, key -> new int[2]);
+        if (urgent) {
+            counters[side] = 0;
+        } else {
+            if (++counters[side] % LANDING_DIAG_INTERVAL_TICKS != 0) {
+                return;
+            }
+        }
+        LivingEntity pilot = vehicle.getControllingPassenger();
+        CruiseRoute.Waypoint waypoint = route == null ? null : route.getTarget();
+        double targetAltitude = route == null ? Double.NaN : landingTargetAltitude(vehicle, route);
+        LandingTarget landingTarget = route == null || waypoint == null
+                ? null : fastLandingTarget(vehicle, route, waypoint);
+        Vec3 reference = horizontalReferencePosition(vehicle);
+        double distanceToReference = landingTarget == null ? Double.NaN
+                : Math.hypot(landingTarget.x() - reference.x, landingTarget.z() - reference.z);
+        double distanceToPlane = landingTarget == null ? Double.NaN
+                : Math.hypot(landingTarget.x() - vehicle.getX(), landingTarget.z() - vehicle.getZ());
+        double contactY = landingContactY(vehicle);
+        Vec3 velocity = vehicle.getDeltaMovement();
+        CruiseDebug.landing(ImmersiveAircraftCruise.LOGGER,
+                "[CruiseLanding] side={} phase={} v={} load={} land={} stage={} tgt={} surf={} planeY={} pilotY={} "
+                        + "contactY={} altErr={} distPlane={} distRef={} xz={}/{} hv={} vv={} onGround={} pitch={} "
+                        + "in={}/{}/{} descend={} brake={} force={} permit={} boostReq={} gateBrake={} {}",
+                vehicle.level().isClientSide() ? "C" : "S",
+                phase,
+                vehicle.getId(),
+                route == null ? "-" : route.getSelectedEntry().loadingMode().serializedName(),
+                route == null ? "-" : route.getEffectiveLandingMode(),
+                route == null ? "-" : route.getLoadingStage(),
+                landingFormat(targetAltitude),
+                groundSurfaceUnder(vehicle),
+                landingFormat(vehicle.getY()),
+                pilot == null ? "-" : landingFormat(pilot.getY()),
+                landingFormat(contactY),
+                landingFormat(targetAltitude - contactY),
+                landingFormat(distanceToPlane),
+                landingFormat(distanceToReference),
+                landingFormat(vehicle.getX()),
+                landingFormat(vehicle.getZ()),
+                landingFormat(horizontalSpeed(vehicle)),
+                landingFormat(velocity.y * 20.0d),
+                vehicle.onGround(),
+                landingFormat(vehicle.getXRot()),
+                landingFormat(vehicle.pressingInterpolatedX.getSmooth()),
+                landingFormat(vehicle.pressingInterpolatedY.getSmooth()),
+                landingFormat(vehicle.pressingInterpolatedZ.getSmooth()),
+                plan != null && plan.descend(),
+                plan != null && plan.brake(),
+                forceDescent,
+                accelerationPermit(vehicle),
+                BOOST_REQUESTED.getOrDefault(vehicle, false),
+                shouldApplyPreloadAccelerationBrake(vehicle),
+                landingPlanText(plan, flare));
+    }
+
+    private static int landingDiagnosticSide(VehicleEntity vehicle) {
+        return vehicle.level().isClientSide() ? LANDING_DIAG_CLIENT_SIDE : LANDING_DIAG_SERVER_SIDE;
+    }
+
+    /** True when this call is the first one to see the new force-descent state for that side of the aircraft. */
+    private static boolean landingForceFlipped(VehicleEntity vehicle, boolean forceDescent) {
+        if (!CruiseDebug.landingEnabled()) {
+            return false;
+        }
+        Boolean[] previous = LANDING_DIAG_FORCE.computeIfAbsent(vehicle, key -> new Boolean[2]);
+        int side = landingDiagnosticSide(vehicle);
+        if (Objects.equals(previous[side], forceDescent)) {
+            return false;
+        }
+        previous[side] = forceDescent;
+        return true;
+    }
+
+    private static String landingFormat(double value) {
+        return Double.isNaN(value) ? "-" : String.format(Locale.ROOT, "%.2f", value);
+    }
+
+    private static String landingPlanText(FastLandingPlan plan, FlareEstimate flare) {
+        if (plan == null) {
+            return "plan=-";
+        }
+        return "plan=raw" + landingFormat(plan.rawDescent())
+                + "/dDist" + landingFormat(plan.descentDistance())
+                + "/sDist" + landingFormat(plan.stopDistance())
+                + "/bt" + landingFormat(plan.boostTarget())
+                + (flare == null ? "" : "/flare" + landingFormat(flare.descent()));
+    }
+
+    /** Y of the first air block above the highest motion-blocking block in the aircraft's own column, or "?" when unknown. */
+    private static String groundSurfaceUnder(VehicleEntity vehicle) {
+        try {
+            Level level = vehicle.level();
+            int x = Mth.floor(vehicle.getX());
+            int z = Mth.floor(vehicle.getZ());
+            ChunkAccess chunk = level.getChunkSource().getChunk(x >> 4, z >> 4, ChunkStatus.FULL, false);
+            if (chunk == null) {
+                return "?";
+            }
+            int surface = chunk.getOrCreateHeightmapUnprimed(Heightmap.Types.MOTION_BLOCKING)
+                    .getFirstAvailable(x & 15, z & 15) + 1;
+            return Integer.toString(surface);
+        } catch (RuntimeException failure) {
+            return "err";
+        }
+    }
+
+    /**
      * Landing altitude the aircraft has to reach.
      *
      * <p>The stored value is the ground block's Y, so a conventional aircraft - which rests with its footprint on that
@@ -3486,6 +3620,9 @@ public final class CruiseController {
     private static void stopNavigation(VehicleEntity vehicle, CruiseVehicleAccess access, CruiseRoute route,
                                        ServerPlayer messagePlayer, boolean clientSide,
                                        CruiseNavigationStopReason reason) {
+        logLandingDiagnostics(vehicle, route,
+                "stop:" + (reason == null ? CruiseNavigationStopReason.NORMAL.name() : reason.name()), true,
+                null, null, false);
         route.stopNavigation();
         L_PENDING_HEADING_SNAPS.remove(vehicle);
         stopNavigationEffects(vehicle, access);
