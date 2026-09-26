@@ -2,10 +2,13 @@ package com.g1739.immersiveaircraftcruise.item;
 
 import com.g1739.immersiveaircraftcruise.cruise.CruiseModuleData;
 import com.g1739.immersiveaircraftcruise.cruise.CruiseController;
+import com.g1739.immersiveaircraftcruise.cruise.CruiseImpactGuard;
+import com.g1739.immersiveaircraftcruise.cruise.CruiseRoute;
 import com.g1739.immersiveaircraftcruise.network.CruiseNetwork;
 import com.g1739.immersiveaircraftcruise.network.OpenCruiseScreenPacket;
 import net.minecraft.ChatFormatting;
 import net.minecraft.network.chat.Component;
+import net.minecraft.network.chat.Style;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.InteractionResultHolder;
@@ -19,8 +22,12 @@ import net.minecraftforge.network.PacketDistributor;
 import org.jetbrains.annotations.Nullable;
 
 import java.util.List;
+import java.util.Locale;
 
 public class CruiseModuleItem extends Item {
+    /** Sky blue used for the "fully charged" tooltip line. */
+    private static final int GUARD_READY_COLOR = 0x55FFFF;
+
     public CruiseModuleItem(Properties properties) {
         super(properties);
     }
@@ -59,6 +66,29 @@ public class CruiseModuleItem extends Item {
                 Component.translatable("tooltip.immersive_aircraft_cruise.overclock_mode").withStyle(ChatFormatting.GOLD)));
         tooltip.add(Component.translatable("tooltip.immersive_aircraft_cruise.cruise_module_refresh",
                 Component.keybind("key.immersive_aircraft_cruise.refresh_ride")));
+        CruiseRoute moduleRoute = CruiseModuleData.read(stack);
+        tooltip.add(Component.translatable(moduleRoute.isImpactGuardAlways()
+                        ? "tooltip.immersive_aircraft_cruise.impact_guard.always"
+                        : "tooltip.immersive_aircraft_cruise.impact_guard.nav_only")
+                .withStyle(moduleRoute.isImpactGuardAlways() ? ChatFormatting.YELLOW : ChatFormatting.GREEN));
+        long guardCooldownEnd = CruiseModuleData.guardCooldownEnd(stack);
+        if (guardCooldownEnd <= 0L) {
+            tooltip.add(Component.translatable("tooltip.immersive_aircraft_cruise.impact_guard.ready")
+                    .withStyle(Style.EMPTY.withColor(GUARD_READY_COLOR)));
+        } else if (level != null) {
+            long now = level.getGameTime();
+            if (CruiseImpactGuard.remainingGuardSeconds(guardCooldownEnd, now) <= 0L) {
+                tooltip.add(Component.translatable("tooltip.immersive_aircraft_cruise.impact_guard.ready")
+                        .withStyle(Style.EMPTY.withColor(GUARD_READY_COLOR)));
+            } else {
+                // Second granularity: the readout steps exactly 0.5% once per second instead of
+                // visibly ticking several times per second.
+                float charge = CruiseImpactGuard.guardChargePercent(guardCooldownEnd, now);
+                tooltip.add(Component.translatable("tooltip.immersive_aircraft_cruise.impact_guard.charging",
+                                String.format(Locale.ROOT, "%.1f", charge))
+                        .withStyle(ChatFormatting.RED));
+            }
+        }
         super.appendHoverText(stack, level, tooltip, flag);
     }
 }

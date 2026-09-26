@@ -2,6 +2,7 @@ package com.g1739.immersiveaircraftcruise.client;
 
 import com.g1739.immersiveaircraftcruise.ImmersiveAircraftCruise;
 import com.g1739.immersiveaircraftcruise.CruiseDebug;
+import com.g1739.immersiveaircraftcruise.CruiseItems;
 import com.g1739.immersiveaircraftcruise.client.gui.CruiseScreen;
 import com.g1739.immersiveaircraftcruise.cruise.CruiseController;
 import com.g1739.immersiveaircraftcruise.cruise.CruiseFuelInfo;
@@ -28,6 +29,7 @@ import net.minecraft.world.level.chunk.EmptyLevelChunk;
 import net.minecraft.world.level.chunk.LevelChunk;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.player.Player;
+import net.minecraft.world.item.ItemStack;
 
 import java.util.List;
 import java.util.LinkedHashMap;
@@ -221,6 +223,22 @@ public final class ClientPacketHandlers {
             minecraft.setScreen(new CruiseScreen(entityId, route.copy(), readOnly,
                     decelerateWhenChunksNotReady));
         }
+    }
+
+    /**
+     * Plays the vanilla item activation animation (the "totem of undying" animation) on the local
+     * player, using the cruise module as the animated item. Sent to every player riding the aircraft
+     * whose impact protection just triggered.
+     */
+    public static void playGuardEffect(int entityId) {
+        Minecraft minecraft = Minecraft.getInstance();
+        if (minecraft.player == null) {
+            return;
+        }
+        if (minecraft.player.getRootVehicle().getId() != entityId) {
+            return;
+        }
+        minecraft.gameRenderer.displayItemActivation(new ItemStack(CruiseItems.CRUISE_MODULE.get()));
     }
 
     public static void updateCruiseRoute(int entityId, CruiseRoute route) {

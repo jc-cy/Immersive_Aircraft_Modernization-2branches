@@ -38,8 +38,15 @@ public class CruiseScreen extends Screen {
     private static final int LABEL_COLOR = 0xF2F2F2;
     private static final int MUTED_LABEL_COLOR = 0xC8C8C8;
     private static final int ROUTE_NAME_LABEL_X = 0;
-    private static final int ROUTE_NAME_FIELD_WIDTH = 132;
+    private static final int ROUTE_NAME_FIELD_MAX_WIDTH = 132;
+    private static final int ROUTE_NAME_FIELD_MIN_WIDTH = 72;
     private static final int DEFAULT_ALTITUDE_FIELD_WIDTH = 64;
+    /** Space kept free at the right edge of the panel. */
+    private static final int PANEL_RIGHT_MARGIN = 8;
+    /** Gap between the cruise mode button and the impact protection button. */
+    private static final int GUARD_ROW_GAP = 12;
+    private static final int IMPACT_GUARD_ALWAYS_COLOR = 0xFFFF55;
+    private static final int IMPACT_GUARD_NAV_ONLY_COLOR = 0x55FF55;
     private static final int LANDING_LABEL_X = 0;
     private static final int LANDING_ALTITUDE_FIELD_WIDTH = 56;
     private static final int WAYPOINT_LABEL_WIDTH = 88;
@@ -71,6 +78,9 @@ public class CruiseScreen extends Screen {
     private EditBox routeNameBox;
     private EditBox defaultAltitudeBox;
     private EditBox landingAltitudeBox;
+    private Button impactGuardButton;
+    /** Width actually used for the route name field; shrinks so the impact buttons always fit. */
+    private int routeNameFieldWidth = ROUTE_NAME_FIELD_MAX_WIDTH;
     private boolean dirty;
     private boolean confirmDeleteRoute;
     private boolean draggingHud;
@@ -128,11 +138,12 @@ public class CruiseScreen extends Screen {
         routeNameBox = null;
         defaultAltitudeBox = null;
         landingAltitudeBox = null;
+        impactGuardButton = null;
 
         int panelWidth = Math.min(PANEL_WIDTH, width - 24);
         int left = (width - panelWidth) / 2;
         int top = TOP_ROW_Y;
-        FormRow routeRow = routeSettingsRow(left);
+        FormRow routeRow = routeSettingsRow(left, panelWidth);
 
         addRenderableWidget(Button.builder(Component.literal("<"), button -> selectRoute(route.getSelectedRoute() - 1))
                 .bounds(left, top, 22, 20).build());
@@ -157,7 +168,7 @@ public class CruiseScreen extends Screen {
             toggleHud(button);
         }).bounds(left + panelWidth - 84, top, 84, 20).build());
 
-        routeNameBox = new EditBox(font, routeRow.firstControlX(), ROUTE_SETTINGS_ROW_Y, ROUTE_NAME_FIELD_WIDTH, 20,
+        routeNameBox = new EditBox(font, routeRow.firstControlX(), ROUTE_SETTINGS_ROW_Y, routeNameFieldWidth, 20,
                 Component.translatable("screen.immersive_aircraft_cruise.route_name"));
         routeNameBox.setValue(routeName);
         routeNameBox.setMaxLength(64);
@@ -189,6 +200,22 @@ public class CruiseScreen extends Screen {
                 .build();
         cruiseModeButton.setFGColor(cruiseModeTextColor());
         addWritableWidget(cruiseModeButton);
+
+        int impactGuardX = routeRow.thirdControlX() + cruiseModeButtonWidth() + GUARD_ROW_GAP;
+        impactGuardButton = Button.builder(impactGuardLabel(), button -> {
+            boolean impactGuardAlways = !route.isImpactGuardAlways();
+            route.setImpactGuardAlways(impactGuardAlways);
+            button.setMessage(impactGuardLabel());
+            button.setTooltip(impactGuardTooltip());
+            button.setFGColor(impactGuardTextColor());
+            pushImpactGuardToVehicleMirror(impactGuardAlways);
+            markDirty();
+            autoSaveDraft();
+        }).bounds(impactGuardX, ROUTE_SETTINGS_ROW_Y, impactGuardButtonWidth(), 20)
+                .tooltip(impactGuardTooltip())
+                .build();
+        impactGuardButton.setFGColor(impactGuardTextColor());
+        addWritableWidget(impactGuardButton);
 
         int listTop = WAYPOINT_LIST_TOP;
         int visibleRows = visibleRows(listTop);
@@ -446,6 +473,9 @@ public class CruiseScreen extends Screen {
         } else if (liveSnapshot != null) {
             saved.applyRuntimeAndSelectionFrom(liveSnapshot);
         }
+        // The impact protection mode is a module definition, not runtime progress: the draft the
+        // player just edited always wins over whatever the live mirror still holds.
+        saved.setImpactGuardAlways(draft.isImpactGuardAlways());
         if (minecraft != null && minecraft.level != null) {
             Entity entity = minecraft.level.getEntity(entityId);
             if (entity instanceof CruiseVehicleAccess access) {
@@ -474,15 +504,81 @@ public class CruiseScreen extends Screen {
         }
     }
 
-    private FormRow routeSettingsRow(int left) {
+    private FormRow routeSettingsRow(int left, int panelWidth) {
         Component routeNameLabel = Component.translatable("screen.immersive_aircraft_cruise.route_name");
         Component defaultAltitudeLabel = Component.translatable("screen.immersive_aircraft_cruise.default_altitude");
         int routeLabelX = left + ROUTE_NAME_LABEL_X;
         int routeFieldX = routeLabelX + font.width(routeNameLabel) + LABEL_CONTENT_GAP;
-        int defaultLabelX = routeFieldX + ROUTE_NAME_FIELD_WIDTH + CONTROL_GAP;
+        routeNameFieldWidth = routeNameFieldWidth(panelWidth);
+        int defaultLabelX = routeFieldX + routeNameFieldWidth + CONTROL_GAP;
         int defaultFieldX = defaultLabelX + font.width(defaultAltitudeLabel) + LABEL_CONTENT_GAP;
         int modeButtonX = defaultFieldX + DEFAULT_ALTITUDE_FIELD_WIDTH + CONTROL_GAP;
         return new FormRow(routeLabelX, routeFieldX, defaultLabelX, defaultFieldX, modeButtonX);
+    }
+
+    /**
+     * The route settings row also carries the impact protection switch. The name field gives up the
+     * space: it keeps the preferred width when the panel allows it and shrinks down to a usable
+     * minimum on narrow panels instead of letting the switch run past the panel.
+     */
+    private int routeNameFieldWidth(int panelWidth) {
+        Component routeNameLabel = Component.translatable("screen.immersive_aircraft_cruise.route_name");
+        Component defaultAltitudeLabel = Component.translatable("screen.immersive_aircraft_cruise.default_altitude");
+        int fixed = font.width(routeNameLabel) + LABEL_CONTENT_GAP
+                + CONTROL_GAP + font.width(defaultAltitudeLabel) + LABEL_CONTENT_GAP
+                + DEFAULT_ALTITUDE_FIELD_WIDTH + CONTROL_GAP
+                + cruiseModeButtonWidth() + GUARD_ROW_GAP
+                + impactGuardButtonWidth()
+                + PANEL_RIGHT_MARGIN;
+        return clamp(panelWidth - fixed, ROUTE_NAME_FIELD_MIN_WIDTH, ROUTE_NAME_FIELD_MAX_WIDTH);
+    }
+
+    private Component impactGuardLabel() {
+        return Component.translatable(route.isImpactGuardAlways()
+                ? "screen.immersive_aircraft_cruise.impact_guard.always"
+                : "screen.immersive_aircraft_cruise.impact_guard.nav_only");
+    }
+
+    private int impactGuardButtonWidth() {
+        return Math.max(
+                font.width(Component.translatable("screen.immersive_aircraft_cruise.impact_guard.always")),
+                font.width(Component.translatable("screen.immersive_aircraft_cruise.impact_guard.nav_only")))
+                + BUTTON_HORIZONTAL_PADDING;
+    }
+
+    private Tooltip impactGuardTooltip() {
+        return Tooltip.create(Component.translatable(route.isImpactGuardAlways()
+                ? "screen.immersive_aircraft_cruise.impact_guard.always.tooltip"
+                : "screen.immersive_aircraft_cruise.impact_guard.nav_only.tooltip"));
+    }
+
+    private int impactGuardTextColor() {
+        return route.isImpactGuardAlways() ? IMPACT_GUARD_ALWAYS_COLOR : IMPACT_GUARD_NAV_ONLY_COLOR;
+    }
+
+    private void refreshImpactGuardButton() {
+        if (impactGuardButton != null) {
+            impactGuardButton.setMessage(impactGuardLabel());
+            impactGuardButton.setTooltip(impactGuardTooltip());
+            impactGuardButton.setFGColor(impactGuardTextColor());
+        }
+    }
+
+    /**
+     * Keeps the client-side aircraft route mirror in step with the switch. Saving merges runtime
+     * state from that mirror, so without this the freshly toggled mode would be overwritten with the
+     * stale value before it ever reaches the server (same reason the HUD switch updates it).
+     */
+    private void pushImpactGuardToVehicleMirror(boolean impactGuardAlways) {
+        if (minecraft == null || minecraft.level == null) {
+            return;
+        }
+        Entity entity = minecraft.level.getEntity(entityId);
+        if (entity instanceof CruiseVehicleAccess access) {
+            CruiseRoute synced = access.iacruise$getRoute().copy();
+            synced.setImpactGuardAlways(impactGuardAlways);
+            access.iacruise$setRoute(synced);
+        }
     }
 
     private FormRow landingSettingsRow(int left) {
@@ -567,6 +663,7 @@ public class CruiseScreen extends Screen {
         }
         if (dirty) {
             route.applyRuntimeFrom(syncedRoute);
+            refreshImpactGuardButton();
             return;
         }
         route = syncedRoute.copy();
@@ -805,7 +902,7 @@ public class CruiseScreen extends Screen {
         CruiseRoute previewRoute = previewRoute();
         int panelWidth = Math.min(PANEL_WIDTH, width - 24);
         int left = (width - panelWidth) / 2;
-        FormRow routeRow = routeSettingsRow(left);
+        FormRow routeRow = routeSettingsRow(left, panelWidth);
         FormRow landingRow = landingSettingsRow(left);
         graphics.drawString(font, title, left, 10, 0xFFFFFF, true);
         drawRouteStatus(graphics, previewRoute, left, panelWidth);
