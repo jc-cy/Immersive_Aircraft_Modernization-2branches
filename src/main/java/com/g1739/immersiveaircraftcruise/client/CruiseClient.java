@@ -2,6 +2,7 @@ package com.g1739.immersiveaircraftcruise.client;
 
 import com.g1739.immersiveaircraftcruise.ImmersiveAircraftCruise;
 import com.g1739.immersiveaircraftcruise.CruiseDebug;
+import com.g1739.immersiveaircraftcruise.CruiseItems;
 import com.g1739.immersiveaircraftcruise.cruise.CruiseController;
 import com.g1739.immersiveaircraftcruise.cruise.CruiseModuleData;
 import com.g1739.immersiveaircraftcruise.cruise.CruiseRoute;
@@ -32,6 +33,7 @@ import net.neoforged.fml.event.lifecycle.FMLClientSetupEvent;
 import net.neoforged.neoforge.client.event.ClientPlayerNetworkEvent;
 import net.neoforged.neoforge.client.event.ClientTickEvent;
 import net.neoforged.neoforge.client.event.RegisterGuiLayersEvent;
+import net.neoforged.neoforge.client.event.RegisterItemDecorationsEvent;
 import net.neoforged.neoforge.client.event.RegisterKeyMappingsEvent;
 import net.neoforged.neoforge.client.gui.VanillaGuiLayers;
 import net.neoforged.neoforge.client.settings.KeyConflictContext;
@@ -89,6 +91,11 @@ public final class CruiseClient {
             event.registerAbove(VanillaGuiLayers.HOTBAR,
                     ResourceLocation.fromNamespaceAndPath(ImmersiveAircraftCruise.MOD_ID, "cruise_hud"),
                     CruiseHud::render);
+        }
+
+        @SubscribeEvent
+        public static void registerItemDecorations(RegisterItemDecorationsEvent event) {
+            event.register(CruiseItems.CRUISE_MODULE.get(), new CruiseModuleGuardDecorator());
         }
     }
 

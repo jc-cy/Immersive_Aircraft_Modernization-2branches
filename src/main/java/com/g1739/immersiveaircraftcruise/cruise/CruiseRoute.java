@@ -29,6 +29,11 @@ public class CruiseRoute {
     private boolean holdingPattern;
     private boolean hudEnabled;
     private boolean initialAltitudeReached;
+    /**
+     * Aircraft impact protection mode stored on the module itself. {@code false} is the default
+     * "navigation only" mode; {@code true} keeps the protection armed while parked as well.
+     */
+    private boolean impactGuardAlways;
     private int selectedRoute;
     private int currentIndex;
     /**
@@ -58,15 +63,23 @@ public class CruiseRoute {
     public CruiseRoute(boolean enabled, boolean holdingPattern, boolean hudEnabled, int selectedRoute, int currentIndex, Waypoint startPoint,
                        boolean initialAltitudeReached, int loadingStage, List<RouteEntry> routes) {
         this(enabled, holdingPattern, hudEnabled, selectedRoute, currentIndex, startPoint,
-                initialAltitudeReached, loadingStage, null, routes);
+                initialAltitudeReached, loadingStage, null, false, routes);
     }
 
     public CruiseRoute(boolean enabled, boolean holdingPattern, boolean hudEnabled, int selectedRoute, int currentIndex, Waypoint startPoint,
                        boolean initialAltitudeReached, int loadingStage, Integer lFirstLineCoordinate, List<RouteEntry> routes) {
+        this(enabled, holdingPattern, hudEnabled, selectedRoute, currentIndex, startPoint,
+                initialAltitudeReached, loadingStage, lFirstLineCoordinate, false, routes);
+    }
+
+    public CruiseRoute(boolean enabled, boolean holdingPattern, boolean hudEnabled, int selectedRoute, int currentIndex, Waypoint startPoint,
+                       boolean initialAltitudeReached, int loadingStage, Integer lFirstLineCoordinate,
+                       boolean impactGuardAlways, List<RouteEntry> routes) {
         this.enabled = enabled;
         this.holdingPattern = holdingPattern;
         this.hudEnabled = hudEnabled;
         this.initialAltitudeReached = initialAltitudeReached;
+        this.impactGuardAlways = impactGuardAlways;
         this.selectedRoute = Math.max(0, selectedRoute);
         this.currentIndex = Math.max(0, currentIndex);
         this.loadingStage = Math.max(0, Math.min(L_STAGE_MAX, loadingStage));
@@ -86,7 +99,7 @@ public class CruiseRoute {
 
     public CruiseRoute copy() {
         return new CruiseRoute(enabled, holdingPattern, hudEnabled, selectedRoute, currentIndex, startPoint,
-                initialAltitudeReached, loadingStage, lFirstLineCoordinate, routes);
+                initialAltitudeReached, loadingStage, lFirstLineCoordinate, impactGuardAlways, routes);
     }
 
     public boolean isEnabled() {
@@ -128,6 +141,14 @@ public class CruiseRoute {
 
     public void setHudEnabled(boolean hudEnabled) {
         this.hudEnabled = hudEnabled;
+    }
+
+    public boolean isImpactGuardAlways() {
+        return impactGuardAlways;
+    }
+
+    public void setImpactGuardAlways(boolean impactGuardAlways) {
+        this.impactGuardAlways = impactGuardAlways;
     }
 
     public int getSelectedRoute() {
@@ -613,6 +634,7 @@ public class CruiseRoute {
             return;
         }
         hudEnabled = source.hudEnabled;
+        impactGuardAlways = source.impactGuardAlways;
         if (source.selectedRoute != selectedRoute) {
             return;
         }
@@ -723,6 +745,7 @@ public class CruiseRoute {
         buffer.writeBoolean(enabled);
         buffer.writeBoolean(holdingPattern);
         buffer.writeBoolean(hudEnabled);
+        buffer.writeBoolean(impactGuardAlways);
         buffer.writeInt(selectedRoute);
         buffer.writeInt(currentIndex);
         buffer.writeBoolean(startPoint != null);
@@ -745,6 +768,7 @@ public class CruiseRoute {
         boolean enabled = buffer.readBoolean();
         boolean holdingPattern = buffer.readBoolean();
         boolean hudEnabled = buffer.readBoolean();
+        boolean impactGuardAlways = buffer.readBoolean();
         int selectedRoute = buffer.readInt();
         int currentIndex = buffer.readInt();
         Waypoint startPoint = buffer.readBoolean() ? Waypoint.read(buffer) : null;
@@ -761,7 +785,7 @@ public class CruiseRoute {
             routes.add(route);
         }
         return new CruiseRoute(enabled, holdingPattern, hudEnabled, selectedRoute, currentIndex, startPoint,
-                initialAltitudeReached, loadingStage, lFirstLineCoordinate, routes);
+                initialAltitudeReached, loadingStage, lFirstLineCoordinate, impactGuardAlways, routes);
     }
 
     public CompoundTag toTag() {
@@ -769,6 +793,7 @@ public class CruiseRoute {
         tag.putBoolean("Enabled", enabled);
         tag.putBoolean("HoldingPattern", holdingPattern);
         tag.putBoolean("HudEnabled", hudEnabled);
+        tag.putBoolean("ImpactGuardAlways", impactGuardAlways);
         tag.putInt("SelectedRoute", selectedRoute);
         tag.putInt("CurrentIndex", currentIndex);
         if (startPoint != null) {
@@ -809,6 +834,7 @@ public class CruiseRoute {
                         : tag.getInt("CurrentIndex") > 0 || tag.getBoolean("HoldingPattern"),
                 tag.contains("LoadingStage", Tag.TAG_INT) ? tag.getInt("LoadingStage") : 0,
                 tag.contains("LFirstLineCoordinate", Tag.TAG_INT) ? tag.getInt("LFirstLineCoordinate") : null,
+                tag.getBoolean("ImpactGuardAlways"),
                 routes
         );
     }

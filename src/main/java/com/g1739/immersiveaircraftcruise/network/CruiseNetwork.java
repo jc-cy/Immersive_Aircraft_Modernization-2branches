@@ -12,7 +12,7 @@ import net.neoforged.neoforge.network.registration.PayloadRegistrar;
 
 @EventBusSubscriber(modid = ImmersiveAircraftCruise.MOD_ID, bus = EventBusSubscriber.Bus.MOD)
 public final class CruiseNetwork {
-    private static final String PROTOCOL_VERSION = "30";
+    private static final String PROTOCOL_VERSION = "31";
 
     private CruiseNetwork() {
     }
@@ -52,5 +52,6 @@ public final class CruiseNetwork {
         registrar.playToClient(CruiseRouteChunkPacket.TYPE, CruiseRouteChunkPacket.STREAM_CODEC, CruiseRouteChunkPacket::handle);
         registrar.playToServer(RequestCruiseRideResyncPacket.TYPE, RequestCruiseRideResyncPacket.STREAM_CODEC, RequestCruiseRideResyncPacket::handle);
         registrar.playToServer(SetPreloadDecelerationPacket.TYPE, SetPreloadDecelerationPacket.STREAM_CODEC, SetPreloadDecelerationPacket::handle);
+        registrar.playToClient(PlayCruiseGuardEffectPacket.TYPE, PlayCruiseGuardEffectPacket.STREAM_CODEC, PlayCruiseGuardEffectPacket::handle);
     }
 }

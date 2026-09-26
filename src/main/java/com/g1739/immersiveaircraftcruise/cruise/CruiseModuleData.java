@@ -19,6 +19,12 @@ public final class CruiseModuleData {
     public static final String ROUTE_TAG = "ImmersiveAircraftCruiseRoute";
     public static final String BOOSTING_TAG = "ImmersiveAircraftCruiseBoosting";
     public static final String MODULE_ID_TAG = "ImmersiveAircraftCruiseModuleId";
+    /**
+     * Server-authoritative impact protection cooldown, stored on the module itself so it follows the
+     * item everywhere (any inventory, any container, any viewer). Value is the world game time at
+     * which the cooldown ends; the trigger time is derivable from the known cooldown length.
+     */
+    public static final String GUARD_COOLDOWN_END_TAG = "ImmersiveAircraftCruiseGuardCooldownEnd";
 
     private CruiseModuleData() {
     }
@@ -156,6 +162,41 @@ public final class CruiseModuleData {
         if (hasCustomData(stack, BOOSTING_TAG)) {
             removeCustomData(stack, BOOSTING_TAG);
         }
+    }
+
+    public static long guardCooldownEnd(ItemStack stack) {
+        CompoundTag tag = readCustomData(stack);
+        if (!tag.contains(GUARD_COOLDOWN_END_TAG, Tag.TAG_LONG)) {
+            return 0L;
+        }
+        return tag.getLong(GUARD_COOLDOWN_END_TAG);
+    }
+
+    public static boolean isGuardCooling(ItemStack stack, long now) {
+        return guardCooldownEnd(stack) > now;
+    }
+
+    /**
+     * Writes the new cooldown deadline into the module installed in the aircraft's upgrade slots.
+     *
+     * @return true when a module was found and updated
+     */
+    public static boolean setGuardCooldownEnd(VehicleEntity vehicle, long cooldownEnd) {
+        if (!(vehicle instanceof InventoryVehicleEntity inventoryVehicle)) {
+            return false;
+        }
+        for (SlotDescription slot : inventoryVehicle.getInventoryDescription().getSlots(VehicleInventoryDescription.UPGRADE)) {
+            ItemStack stack = inventoryVehicle.getInventory().getItem(slot.index());
+            if (!stack.is(CruiseItems.CRUISE_MODULE.get())) {
+                continue;
+            }
+            CompoundTag tag = readCustomData(stack);
+            tag.putLong(GUARD_COOLDOWN_END_TAG, cooldownEnd);
+            writeCustomData(stack, tag);
+            inventoryVehicle.getInventory().setItem(slot.index(), stack);
+            return true;
+        }
+        return false;
     }
 
     private static boolean hasCustomData(ItemStack stack, String key) {
