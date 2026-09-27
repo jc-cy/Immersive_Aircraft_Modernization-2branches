@@ -29,6 +29,12 @@ public final class CruiseRouteCache {
     private static Path directory;
     private static final int MAX_ENTRIES = 1024;
     private static final long MAX_PAYLOAD_BYTES = 4L * 1024L * 1024L;
+    /**
+     * In-memory route cache. Both maps are client-thread state: the IO executor only reads and writes the cache
+     * files ({@link #readEntry}, {@link #writeEntry}, {@link #deleteEntry}) and hands the loaded entries back with
+     * {@link Minecraft#execute}, so no map here is ever touched from two threads. Cross-thread session state is the
+     * {@link #SESSION_GENERATION} counter alone - keep both properties before moving any call off the client thread.
+     */
     private static final Map<Long, Entry> entries = new LinkedHashMap<>(16, 0.75f, true);
     private static final Map<Long, Long> active = new HashMap<>();
     private static final AtomicLong DIAGNOSTIC_SEQUENCE = new AtomicLong();

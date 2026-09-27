@@ -232,7 +232,7 @@ public final class CruiseChunkSendScheduler {
             player.connection.teleport(player.getX(), player.getY(), player.getZ(),
                     player.getYRot(), player.getXRot());
         }
-        CruiseDebug.info(ImmersiveAircraftCruise.LOGGER, 
+        CruiseDebug.info(ImmersiveAircraftCruise.LOGGER,
                 "[CruiseRide] player={} {} vehicleId={}, passengers={}, tick={}",
                 player.getScoreboardName(), mounted ? "boarded" : "left",
                 vehicle.getId(), passengers.size(), player.server.getTickCount());
@@ -533,7 +533,7 @@ public final class CruiseChunkSendScheduler {
             player.connection.send(new ClientboundTeleportEntityPacket(vehicle));
         }
         CruiseController.synchronizeCruiseMovement(vehicle, "ride-repair");
-        CruiseDebug.info(ImmersiveAircraftCruise.LOGGER, 
+        CruiseDebug.info(ImmersiveAircraftCruise.LOGGER,
                 "[CruiseRide] re-sent aircraft state: player={}, vehicleId={}, riders={}",
                 player.getScoreboardName(), vehicle.getId(), vehicle.getPassengers().size());
     }
@@ -681,7 +681,7 @@ public final class CruiseChunkSendScheduler {
                 // the next packets, so the passenger list can never describe an aircraft the client has
                 // not been told about yet.
                 pairAircraftWith(player, vehicle);
-                CruiseDebug.info(ImmersiveAircraftCruise.LOGGER, 
+                CruiseDebug.info(ImmersiveAircraftCruise.LOGGER,
                         "[CruiseRide] restored ride after the aircraft was loaded again: "
                                 + "player={}, vehicleUuid={}",
                         player.getScoreboardName(), vehicle.getUUID());

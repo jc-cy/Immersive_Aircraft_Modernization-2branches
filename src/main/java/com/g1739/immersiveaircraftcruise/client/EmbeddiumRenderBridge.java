@@ -48,7 +48,7 @@ public final class EmbeddiumRenderBridge {
         RENDERER_INSTANCE = rendererInstance;
         RENDER_SECTION_MANAGER = renderSectionManager;
         RENDER_SECTION_MANAGER_CHUNK_ADDED = renderSectionManagerChunkAdded;
-        CruiseDebug.info(ImmersiveAircraftCruise.LOGGER, 
+        CruiseDebug.info(ImmersiveAircraftCruise.LOGGER,
                 "[CruiseRender] Embeddium bridge {} (tracker={}, directSections={})",
                 rendererInstance != null && renderSectionManagerChunkAdded != null ? "available" : "unavailable",
                 trackerGet != null && trackerStatusAdded != null,
@@ -76,7 +76,7 @@ public final class EmbeddiumRenderBridge {
             }
             RENDER_SECTION_MANAGER_CHUNK_ADDED.invoke(sectionManager, chunkX, chunkZ);
             if (FIRST_DIRECT_SECTION.compareAndSet(false, true)) {
-                CruiseDebug.info(ImmersiveAircraftCruise.LOGGER, 
+                CruiseDebug.info(ImmersiveAircraftCruise.LOGGER,
                         "[CruiseRender] direct Embeddium section creation active at chunk={}/{}",
                         chunkX, chunkZ);
             }

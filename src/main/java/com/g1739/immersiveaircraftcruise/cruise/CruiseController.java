@@ -542,7 +542,7 @@ public final class CruiseController {
                 && MODE_SWITCH_REPORTED.put(vehicle, Boolean.TRUE) == null) {
             // Handing the aircraft to the straight-line mode has to drop the L heading lock with it.
             releaseLDirectionLock(vehicle);
-            CruiseDebug.info(ImmersiveAircraftCruise.LOGGER, 
+            CruiseDebug.info(ImmersiveAircraftCruise.LOGGER,
                     "[CruiseHandoff] L -> straight-line mode: vehicle={}, distance={}, radius={}, "
                             + "altitudeError={}, speed={}, landingMode={}",
                     vehicle.getId(), Math.round(actualDistance), Math.round(modeSwitchRadius),

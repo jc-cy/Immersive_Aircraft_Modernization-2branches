@@ -66,12 +66,6 @@ public class CruiseRoute {
     }
 
     public CruiseRoute(boolean enabled, boolean holdingPattern, boolean hudEnabled, int selectedRoute, int currentIndex, Waypoint startPoint,
-                       boolean initialAltitudeReached, int loadingStage, Integer lFirstLineCoordinate, List<RouteEntry> routes) {
-        this(enabled, holdingPattern, hudEnabled, selectedRoute, currentIndex, startPoint,
-                initialAltitudeReached, loadingStage, lFirstLineCoordinate, false, routes);
-    }
-
-    public CruiseRoute(boolean enabled, boolean holdingPattern, boolean hudEnabled, int selectedRoute, int currentIndex, Waypoint startPoint,
                        boolean initialAltitudeReached, int loadingStage, Integer lFirstLineCoordinate,
                        boolean impactGuardAlways, List<RouteEntry> routes) {
         this.enabled = enabled;

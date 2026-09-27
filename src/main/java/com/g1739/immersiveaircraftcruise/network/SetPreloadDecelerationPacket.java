@@ -43,7 +43,7 @@ public record SetPreloadDecelerationPacket(int entityId, boolean enabled) {
             }
             CruiseController.setPreloadAutoDeceleration(packet.enabled);
             CruiseController.updatePreloadAccelerationPermit(vehicle);
-            CruiseDebug.info(ImmersiveAircraftCruise.LOGGER, 
+            CruiseDebug.info(ImmersiveAircraftCruise.LOGGER,
                     "[CruisePreload] auto slowdown {}: player={}, vehicleId={}",
                     packet.enabled ? "enabled" : "disabled",
                     player.getScoreboardName(), vehicle.getId());
