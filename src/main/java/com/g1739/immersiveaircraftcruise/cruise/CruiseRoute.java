@@ -66,11 +66,6 @@ public class CruiseRoute {
                 initialAltitudeReached, loadingStage, null, false, routes);
     }
 
-    public CruiseRoute(boolean enabled, boolean holdingPattern, boolean hudEnabled, int selectedRoute, int currentIndex, Waypoint startPoint,
-                       boolean initialAltitudeReached, int loadingStage, Integer lFirstLineCoordinate, List<RouteEntry> routes) {
-        this(enabled, holdingPattern, hudEnabled, selectedRoute, currentIndex, startPoint,
-                initialAltitudeReached, loadingStage, lFirstLineCoordinate, false, routes);
-    }
 
     public CruiseRoute(boolean enabled, boolean holdingPattern, boolean hudEnabled, int selectedRoute, int currentIndex, Waypoint startPoint,
                        boolean initialAltitudeReached, int loadingStage, Integer lFirstLineCoordinate,

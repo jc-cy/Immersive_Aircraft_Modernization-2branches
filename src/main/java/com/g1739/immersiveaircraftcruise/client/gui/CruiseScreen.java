@@ -1,6 +1,7 @@
 package com.g1739.immersiveaircraftcruise.client.gui;
 
 
+import com.g1739.immersiveaircraftcruise.client.CruiseClient;
 import com.g1739.immersiveaircraftcruise.client.CruiseHud;
 import com.g1739.immersiveaircraftcruise.cruise.CruiseController;
 import com.g1739.immersiveaircraftcruise.cruise.CruiseRoute;
@@ -105,6 +106,19 @@ public class CruiseScreen extends Screen {
         return false;
     }
 
+    /**
+     * The open key toggles the screen: pressing it while the screen is up closes it again. Vanilla only
+     * feeds key mappings to the game while no screen is open, so the screen has to match the binding
+     * itself instead of waiting for the client tick.
+     */
+    @Override
+    public boolean keyPressed(int keyCode, int scanCode, int modifiers) {
+        if (CruiseClient.OPEN_CRUISE.matches(keyCode, scanCode)) {
+            onClose();
+            return true;
+        }
+        return super.keyPressed(keyCode, scanCode, modifiers);
+    }
     public boolean isForEntity(int entityId) {
         return this.entityId == entityId;
     }

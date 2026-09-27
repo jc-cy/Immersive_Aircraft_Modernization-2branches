@@ -1,6 +1,7 @@
 package com.g1739.immersiveaircraftcruise.network;
 
 
+import com.g1739.immersiveaircraftcruise.CruiseDebug;
 import com.g1739.immersiveaircraftcruise.ImmersiveAircraftCruise;
 import com.g1739.immersiveaircraftcruise.cruise.CruiseController;
 import immersive_aircraft.entity.VehicleEntity;
@@ -49,7 +50,7 @@ public record SetPreloadDecelerationPacket(int entityId, boolean enabled) implem
             }
             CruiseController.setPreloadAutoDeceleration(packet.enabled);
             CruiseController.updatePreloadAccelerationPermit(vehicle);
-            ImmersiveAircraftCruise.LOGGER.info(
+            CruiseDebug.info(ImmersiveAircraftCruise.LOGGER, 
                     "[CruisePreload] auto slowdown {}: player={}, vehicleId={}",
                     packet.enabled ? "enabled" : "disabled",
                     player.getScoreboardName(), vehicle.getId());

@@ -263,7 +263,7 @@ public final class CruiseClient {
                 if (!loaded || vehicle.horizontalCollision || stalledFlightTicks >= 10) {
                     ImmersiveAircraftCruise.LOGGER.warn(message);
                 } else {
-                    ImmersiveAircraftCruise.LOGGER.info(message);
+                    CruiseDebug.info(ImmersiveAircraftCruise.LOGGER, message);
                 }
                 lastFlightDiagnosticTick = clientTick;
             }

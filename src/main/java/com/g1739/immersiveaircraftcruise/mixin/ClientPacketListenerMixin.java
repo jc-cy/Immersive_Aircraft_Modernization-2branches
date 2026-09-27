@@ -64,7 +64,7 @@ public abstract class ClientPacketListenerMixin {
                 CruiseClientCacheView.radius(), playerChunk, vehicleChunk, gameTime,
                 Thread.currentThread().getName());
         if (activeHash != Long.MIN_VALUE) {
-            ImmersiveAircraftCruise.LOGGER.info(message);
+            CruiseDebug.info(ImmersiveAircraftCruise.LOGGER, message);
         } else {
             ImmersiveAircraftCruise.LOGGER.debug(message);
         }
