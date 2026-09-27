@@ -10,7 +10,7 @@ val immersiveAircraftVersion = "1.4.6+1.21.1+neoforge"
 
 val modId = "immersive_aircraft_cruise"
 val modName = "Immersive_Aircraft_Modernization"
-val modVersion = "1.0.0"
+val modVersion = "1.1.0"
 val modGroupId = "com.g1739.immersiveaircraftcruise"
 val modAuthors = "交错次元"
 val modLicense = "All Rights Reserved"

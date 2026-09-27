@@ -30,6 +30,11 @@ description = '''
 - 巡航模式有超加速、加速、普通、节能四档模式。
 - 各种功能已适配多人乘坐飞机，且多人乘坐飞机时，驾驶员下线会转让驾驶权。
 
+【损毁保护】
+-安装了超频模块的飞机目前可以启用2种飞机损毁保护，全局常驻或者仅限导航模式下。
+-损毁保护类似飞机的不死图腾，默认充能冷却时间为200秒。
+-飞机损毁时，飞机回复至满血并获得三秒无敌，并进入充能冷却。
+
 【按键绑定】
 - 模块本身会显示当前绑定的导航按钮，包含状态刷新、航线图开关和导航开关。均可自行调整。
 - 其中状态刷新按钮可以强制刷新当前飞机实体，可能在异常情况下飞机卡死时有用。
@@ -57,6 +62,11 @@ Core Features
 - Aircraft can choose normal landing or holding pattern; airships additionally support vertical landing.
 - Cruise modes include Super Acceleration, Acceleration, Normal, and Eco.
 - All features are adapted for aircraft carrying multiple passengers, and when the pilot logs out of a multiplayer aircraft, pilot control is handed over to the remaining passenger.
+
+【Damage Protection】
+- Aircraft with the overclock module installed can enable 2 kinds of damage protection: always active, or only while navigation is running.
+- It works like a totem of undying for the aircraft; the default recharge cooldown is 200 seconds.
+- When the aircraft would be destroyed, it recovers to full health, becomes invulnerable for three seconds, and then enters the recharge cooldown.
 
 【Key Bindings】
 - The module itself shows the currently bound navigation keys, including state refresh, route screen toggle, and navigation toggle. All of them can be adjusted as you like.
