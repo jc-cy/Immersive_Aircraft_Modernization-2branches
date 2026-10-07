@@ -3,12 +3,15 @@ package com.g1739.immersiveaircraftcruise.cruise;
 import com.g1739.immersiveaircraftcruise.ImmersiveAircraftCruise;
 import com.g1739.immersiveaircraftcruise.CruiseDebug;
 import com.g1739.immersiveaircraftcruise.mixin.EngineVehicleAccessor;
+import com.g1739.immersiveaircraftcruise.mixin.VehicleEntityAccessor;
 import com.g1739.immersiveaircraftcruise.network.CruiseNetwork;
+import com.g1739.immersiveaircraftcruise.network.RouteStorageTarget;
 import com.g1739.immersiveaircraftcruise.network.StopCruiseNavigationPacket;
 import com.g1739.immersiveaircraftcruise.network.UpdateCruiseAccelerationPermitPacket;
 import com.g1739.immersiveaircraftcruise.network.UpdateCruiseBoostPacket;
 import com.g1739.immersiveaircraftcruise.network.UpdateCruiseFuelPacket;
 import com.g1739.immersiveaircraftcruise.network.UpdateCruiseRoutePacket;
+import com.g1739.immersiveaircraftcruise.network.SyncCruiseRoutePacket;
 import com.g1739.immersiveaircraftcruise.network.SyncVehicleInventoryPacket;
 import immersive_aircraft.entity.AirplaneEntity;
 import immersive_aircraft.entity.EngineVehicle;
@@ -74,8 +77,6 @@ public final class CruiseController {
     private static final int L_TURN_APPROACH = 0;
     private static final int L_TURN_HOLD = 2;
     private static final int L_TURN_DEBUG_SAMPLE_INTERVAL = 5;
-    /** VehicleEntity constructs every input interpolator with ten native steps. */
-    private static final double L_NATIVE_INPUT_INTERPOLATION_STEPS = 10.0d;
     /** Upper bound for the side-effect-free turn prediction loop. */
     private static final int L_TURN_PREDICTION_MAX_TICKS = 180;
     private static final double FINAL_ACCELERATION_CUTOFF = 100.0;
@@ -106,7 +107,6 @@ public final class CruiseController {
     private static final int FAST_LANDING_FLARE_SIMULATION_TICKS = 80;
     private static final double FAST_LANDING_FLARE_VERTICAL_SPEED = 0.08;
     private static final int FAST_LANDING_BRAKE_SIMULATION_TICKS = 120;
-    private static final double AIRPLANE_INPUT_INTERPOLATION_STEP = 0.1d;
     private static final double FAST_LANDING_BRAKE_PLATEAU_DELTA = 0.003;
     private static final int FAST_LANDING_BRAKE_PLATEAU_TICKS = 8;
     private static final double FAST_LANDING_GROUND_STOP_SPEED = 0.01;
@@ -799,11 +799,32 @@ public final class CruiseController {
         }
         // At the low-angle gate the current chunk center is the test target;
         // do not push selection into a farther line based on current speed.
-        route.setLFirstLineCoordinate(route.selectLFirstLine(vehicle.getX(), vehicle.getZ(), 0.0d));
-        if (!clientSide) {
+        int line = route.selectLFirstLine(vehicle.getX(), vehicle.getZ(), 0.0d);
+        route.setLFirstLineCoordinate(line);
+        CruiseDebug.info(ImmersiveAircraftCruise.LOGGER,
+                "[CruiseL] first line selected: vehicleId={}, clientSide={}, x={}, z={}, line={}, axisError={}, "
+                        + "firstAxisX={}, secondAxisSign={}",
+                vehicle.getId(), clientSide, vehicle.getX(), vehicle.getZ(), line, axisError,
+                route.isLFirstAxisX(), route.lSecondAxisSign());
+        if (clientSide) {
+            reportRouteToServer(vehicle, route);
+        } else {
             CruiseModuleData.write(vehicle, route);
             syncRouteToClient(vehicle, route);
         }
+    }
+
+    /**
+     * Hands a client-owned L stage and centre line back to the server.
+     *
+     * <p>The stage machine and its centre line are chosen on the client, but the route record and the preload
+     * corridor are the server's: without this the server keeps an untouched copy, and its next progress sync
+     * hands that copy back - which resets the stage and the line the aircraft is already flying and makes the
+     * client pick a new one.
+     */
+    private static void reportRouteToServer(VehicleEntity vehicle, CruiseRoute route) {
+        CruiseNetwork.sendToServer(new SyncCruiseRoutePacket(
+                vehicle.getId(), RouteStorageTarget.VEHICLE_MODULE, route.copy(), false));
     }
 
     private static double lYawSpeed(VehicleEntity vehicle) {
@@ -917,7 +938,7 @@ public final class CruiseController {
 
             double signedStep = (firstAxisX ? velocity.x : velocity.z) * firstAxisSign;
             alongDistance += signedStep;
-            turnInput += (desiredInput - turnInput) / L_NATIVE_INPUT_INTERPOLATION_STEPS;
+            turnInput += (desiredInput - turnInput) * inputInterpolationStep(vehicle);
             ticks = tick;
             if (turnComplete) {
                 break;
@@ -1171,11 +1192,17 @@ public final class CruiseController {
         if (route.getLoadingStage() == stage) {
             return;
         }
+        CruiseDebug.info(ImmersiveAircraftCruise.LOGGER,
+                "[CruiseL] stage: vehicleId={}, {} -> {}, clientSide={}, lLine={}",
+                vehicle.getId(), route.getLoadingStage(), stage, clientSide,
+                route.getLFirstLineCoordinate());
         L_ALIGNMENT_PLANS.remove(vehicle);
         L_TURN_STATES.remove(vehicle);
         L_PENDING_HEADING_SNAPS.remove(vehicle);
         route.setLoadingStage(stage);
-        if (!clientSide) {
+        if (clientSide) {
+            reportRouteToServer(vehicle, route);
+        } else {
             CruiseModuleData.write(vehicle, route);
             syncRouteToClient(vehicle, route);
         }
@@ -2569,7 +2596,7 @@ public final class CruiseController {
                     landingAltitudeLookahead(horizontalWindow - distance, horizontalLength(velocity)));
             altitudeMemory = simulatedSmoothedAltitudeInput(altitudeMemory, targetAltitudeInput);
             double targetPitchInput = -altitudeMemory;
-            pitchInput = pitchInput + (targetPitchInput - pitchInput) * AIRPLANE_INPUT_INTERPOLATION_STEP;
+            pitchInput = pitchInput + (targetPitchInput - pitchInput) * inputInterpolationStep(vehicle);
         }
 
         return new FlareEstimate(Math.min(dropped, targetDescent), distance);
@@ -2761,7 +2788,7 @@ public final class CruiseController {
             double targetAltitudeInput = simulatedAltitudeInput(-remainingDescent, velocity.y);
             altitudeMemory = simulatedSmoothedAltitudeInput(altitudeMemory, targetAltitudeInput);
             double targetPitchInput = -altitudeMemory;
-            pitchInput = pitchInput + (targetPitchInput - pitchInput) * AIRPLANE_INPUT_INTERPOLATION_STEP;
+            pitchInput = pitchInput + (targetPitchInput - pitchInput) * inputInterpolationStep(vehicle);
         }
 
         return bestDistance > 0.0d
@@ -2856,7 +2883,7 @@ public final class CruiseController {
             engineTarget = 1.0d;
             enginePower = enginePower + (engineTarget - enginePower) * engineStep;
             boostLevel = nextPredictedBoostLevel(boostLevel, targetBoostLevel);
-            pitchInput = pitchInput + (FAST_DESCENT_AIRPLANE_PITCH - pitchInput) * AIRPLANE_INPUT_INTERPOLATION_STEP;
+            pitchInput = pitchInput + (FAST_DESCENT_AIRPLANE_PITCH - pitchInput) * inputInterpolationStep(vehicle);
         }
 
         double averageRate = dropped / Math.max(1.0d, FAST_LANDING_DESCENT_SIMULATION_TICKS);
@@ -2967,11 +2994,9 @@ public final class CruiseController {
     }
 
     private static double enginePowerStep(EngineVehicle engineVehicle, InventoryVehicleEntity inventoryVehicle) {
-        double reactionSpeed = "airship".equals(engineVehicle.identifier.getPath())
-                || "cargo_airship".equals(engineVehicle.identifier.getPath())
-                || "warship".equals(engineVehicle.identifier.getPath()) ? 50.0d : 20.0d;
+        double reactionSpeed = ((EngineVehicleAccessor) engineVehicle).immersive_aircraft_cruise$getEngineReactionSpeed();
         double acceleration = inventoryVehicle.getProperties().get(VehicleStat.ACCELERATION);
-        return Mth.clamp(acceleration / reactionSpeed, 0.01d, 1.0d);
+        return acceleration / reactionSpeed;
     }
 
     private static double horizontalLength(Vec3 velocity) {
@@ -3134,7 +3159,16 @@ public final class CruiseController {
     }
 
     private static double rotorcraftVerticalInputStep(VehicleEntity vehicle) {
-        return "quadrocopter".equals(vehicle.identifier.getPath()) ? 0.2d : 0.1d;
+        return inputInterpolationStep(vehicle);
+    }
+
+    /**
+     * The aircraft's own stick-input smoothing step - {@code 1 / getInputInterpolationSteps()}, the quantity
+     * Immersive Aircraft uses to build {@code pressingInterpolatedX/Y/Z}. Read from the instance so an addon
+     * aircraft that tunes its input response is modelled exactly like a built-in one.
+     */
+    private static double inputInterpolationStep(VehicleEntity vehicle) {
+        return 1.0d / ((VehicleEntityAccessor) vehicle).iacruise$getInputInterpolationSteps();
     }
 
     private static double horizontalSpeed(VehicleEntity vehicle) {

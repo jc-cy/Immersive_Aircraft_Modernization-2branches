@@ -24,6 +24,7 @@ import net.minecraft.server.level.ChunkTaskPriorityQueueSorter;
 import net.minecraft.server.level.DistanceManager;
 import net.minecraft.server.level.ServerChunkCache;
 import net.minecraft.server.level.ServerLevel;
+import net.minecraft.util.Mth;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.server.level.TicketType;
 import net.minecraft.server.level.FullChunkStatus;
@@ -57,6 +58,8 @@ import java.util.concurrent.ConcurrentHashMap;
 
 public final class CruiseChunkSendScheduler {
     private static final int ROUTE_LOOKAHEAD_CHUNKS = 50;
+    /** A straight leg opens the corridor once the aircraft points this far from the route direction. */
+    private static final float PRELOAD_ALIGN_DEGREES = 30.0f;
     private static final int VANILLA_CACHE_RADIUS = 32;
     private static final int ROUTE_CACHE_RADIUS = ROUTE_LOOKAHEAD_CHUNKS + VANILLA_CACHE_RADIUS + 2;
     private static final int ROUTE_TASK_PRIORITY = 0;
@@ -65,6 +68,10 @@ public final class CruiseChunkSendScheduler {
     private static final int ROUTE_MAX_TASK_PRIORITY = ROUTE_LOOKAHEAD_CHUNKS / ROUTE_PRIORITY_SLICE_SPAN;
     /** Keep the route stream ahead of high-speed flight while the client applies packets one per tick. */
     private static final int ROUTE_PACKETS_PER_SERVER_TICK = 4;
+    /**
+     * The stream's flow control: at most this many payloads are unacknowledged at any time, so the client's
+     * receive buffer (sized strictly above this) can always hold everything in flight and never overflows.
+     */
     private static final int ROUTE_PACKET_WINDOW = 32;
     /** Keep the distant corridor ticketed while the separate FULL ticket supplies terrain packets. */
     private static final int ROUTE_PRELOAD_TICKET_LEVEL = 34;
@@ -85,6 +92,8 @@ public final class CruiseChunkSendScheduler {
     private static final int ROUTE_FULL_SLICE_COUNT = ROUTE_LOOKAHEAD_CHUNKS + 1;
     /** Extra acceleration is available once more than ten route chunks are FULL. */
     private static final int ROUTE_ACCELERATION_MIN_FULL_CHUNKS = 10;
+    /** Cached route payloads are re-serialised and compared against the live chunk once per second. */
+    private static final int CACHE_PROBE_INTERVAL_TICKS = 20;
     /** A route packet that has not been acknowledged for this long is sent again. */
     private static final long ROUTE_PACKET_ACK_TIMEOUT_TICKS = 80L;
     /**
@@ -702,29 +711,31 @@ public final class CruiseChunkSendScheduler {
         }
     }
 
+    /**
+     * Drops vanilla's own chunk packet when this client provably holds that exact snapshot already.
+     *
+     * <p>Vanilla offers a chunk to a player exactly once - in the move that brings it into the player's view
+     * square, where {@code ChunkMap#move} compares the old and new squares and {@code ServerPlayer#trackChunk}
+     * does nothing but send - so a packet cancelled here is a delivery that never comes again. The route
+     * stream is an accelerator that reaches the client long before vanilla would, never a stand-in for
+     * vanilla's own delivery: only a snapshot the server still holds and this client has confirmed may
+     * cancel vanilla. Everything else stays vanilla's business, which is the one path that cannot be lost.
+     */
     public static boolean suppressDuplicateChunkSend(ChunkMap chunkMap, ServerPlayer player, LevelChunk chunk) {
         PlayerState state = NETWORK_STATES.get(player);
-        if (state == null
-                || state.chunkMap != chunkMap
-                || !state.priorityPath.corridorChunks().contains(chunk.getPos().toLong())) {
+        if (state == null || state.chunkMap != chunkMap) {
             return false;
         }
-        NavigationContext navigation = navigationContext(player);
-        if (navigation == null) {
+        long chunkKey = chunk.getPos().toLong();
+        CruiseChunkPayloadCache.Snapshot snapshot = CruiseChunkPayloadCache.get(player.serverLevel()).get(chunkKey);
+        Long acknowledged = state.acknowledgedHashes.get(chunkKey);
+        if (snapshot == null || acknowledged == null || acknowledged != snapshot.hash()) {
             return false;
-        }
-        state.refreshPriorityPath(navigation);
-        if (!state.priorityPath.corridorChunks().contains(chunk.getPos().toLong())) {
-            return false;
-        }
-        state.synchronizeRouteCache(player, navigation);
-        if (state.sendRouteChunkIfNeeded(player, chunk.getPos().toLong(), chunk, null,
-                player.server.getTickCount()) > 0) {
-            CruiseDebug.info(ImmersiveAircraftCruise.LOGGER,
-                    "[CruiseChunks] immediate route packet: player={}, chunk={}, trigger=playerLoadedChunk",
-                    player.getScoreboardName(), chunk.getPos());
         }
         state.duplicatePacketsSuppressed++;
+        CruiseDebug.debug(ImmersiveAircraftCruise.LOGGER,
+                "[CruiseChunks] vanilla chunk packet dropped as a duplicate: player={}, chunk={}, hash={}",
+                player.getScoreboardName(), chunk.getPos(), snapshot.hash());
         return true;
     }
 
@@ -736,6 +747,9 @@ public final class CruiseChunkSendScheduler {
         }
         NavigationContext navigation = navigationContext(player);
         if (navigation == null) {
+            return false;
+        }
+        if (!state.isPreloadUnlocked(navigation)) {
             return false;
         }
         state.refreshPriorityPath(navigation);
@@ -809,6 +823,11 @@ public final class CruiseChunkSendScheduler {
      * brake input.
      */
     public static boolean isAccelerationReady(VehicleEntity vehicle, CruiseRoute route) {
+        return corridorFullChunks(vehicle, route) > ROUTE_ACCELERATION_MIN_FULL_CHUNKS;
+    }
+
+    /** Corridor chunks that already have a loaded full chunk; the number the acceleration permit is gated on. */
+    public static int corridorFullChunks(VehicleEntity vehicle, CruiseRoute route) {
         NavigationContext navigation = new NavigationContext(vehicle, route,
                 vehicle.getX(), vehicle.getY(), vehicle.getZ());
         RoutePath path = buildRoutePath(navigation, ROUTE_LOOKAHEAD_CHUNKS);
@@ -819,7 +838,17 @@ public final class CruiseChunkSendScheduler {
                 fullChunks++;
             }
         }
-        return fullChunks > ROUTE_ACCELERATION_MIN_FULL_CHUNKS;
+        return fullChunks;
+    }
+
+    /** How many FULL corridor chunks the acceleration permit needs. */
+    public static int accelerationMinFullChunks() {
+        return ROUTE_ACCELERATION_MIN_FULL_CHUNKS;
+    }
+
+    /** Corridor chunks the permit is measured over. */
+    public static int accelerationLookaheadChunks() {
+        return ROUTE_LOOKAHEAD_CHUNKS;
     }
 
     /** Keeps the current chunk of an actively preloading aircraft loaded while it flies. */
@@ -1283,6 +1312,9 @@ public final class CruiseChunkSendScheduler {
                 state = new PlayerState(player.serverLevel().getChunkSource().chunkMap);
                 NETWORK_STATES.put(player, state);
             }
+            if (!state.isPreloadUnlocked(navigation)) {
+                continue;
+            }
             state.refreshPriorityPath(navigation);
             state.synchronizeRouteCache(player, navigation);
             int sentCount = state.sendPriorityChunks(player, server.getTickCount());
@@ -1485,6 +1517,7 @@ public final class CruiseChunkSendScheduler {
         // The preload screen owns the auto-slowdown switch, so every session starts from the safe default.
         CruiseController.setPreloadAutoDeceleration(true);
         NETWORK_STATES.clear();
+        CruiseChunkPayloadCache.clearAll();
         PENDING_TELEPORTS.clear();
         RIDE_RESYNC_COOLDOWNS.clear();
         HARD_RESET_COOLDOWNS.clear();
@@ -1797,6 +1830,49 @@ public final class CruiseChunkSendScheduler {
             cache.put(chunkKey, snapshot);
         }
         return snapshot;
+    }
+
+    /** One cached chunk per second is serialised again and compared, so a cache that drifts from the live
+     *  chunk is caught in the act instead of surfacing in game as blocks the world no longer has. */
+    private static long lastCacheProbeTick = Long.MIN_VALUE;
+
+    private static void probeCachedSnapshot(PlayerState state, ServerLevel level, LevelChunk chunk,
+                                            CruiseChunkPayloadCache.Snapshot snapshot, long serverTick) {
+        if (lastCacheProbeTick != Long.MIN_VALUE
+                && serverTick - lastCacheProbeTick < CACHE_PROBE_INTERVAL_TICKS) {
+            return;
+        }
+        lastCacheProbeTick = serverTick;
+        ClientboundLevelChunkWithLightPacket packet = new ClientboundLevelChunkWithLightPacket(
+                chunk, ((ChunkMapInvoker) state.chunkMap).iacruise$getLightEngine(), null, null);
+        byte[] fresh = CruiseChunkPayloadCodec.encode(packet, level.registryAccess());
+        long freshHash = CruiseChunkPayloadCodec.hash(fresh);
+        boolean stale = freshHash != snapshot.hash();
+        CruiseDebug.info(ImmersiveAircraftCruise.LOGGER,
+                "[CruiseCacheProbe] chunk={}/{}, cachedHash={}, freshHash={}, stale={}, chunkUnsaved={}, "
+                        + "freshBytes={}",
+                chunk.getPos().x, chunk.getPos().z, snapshot.hash(), freshHash, stale, chunk.isUnsaved(),
+                fresh.length);
+        if (stale) {
+            // The cached bytes are not what the chunk would serialise to now: drop them and let the next
+            // pass rebuild, which is exactly what the pre-fix server failed to do.
+            CruiseDebug.info(ImmersiveAircraftCruise.LOGGER,
+                    "[CruiseCacheProbe] chunk={}/{} detail: cachedBytes={}, freshBytes={}, firstDiff={}",
+                    chunk.getPos().x, chunk.getPos().z, snapshot.compressedPayload().length, fresh.length,
+                    firstDifference(CruiseChunkPayloadCodec.decompress(snapshot.compressedPayload()), fresh));
+            CruiseChunkPayloadCache.get(level).invalidate(chunk.getPos().toLong());
+        }
+    }
+
+    /** Byte offset of the first mismatch between the cached and freshly serialised chunk payload. */
+    private static int firstDifference(byte[] cached, byte[] fresh) {
+        int limit = Math.min(cached.length, fresh.length);
+        for (int index = 0; index < limit; index++) {
+            if (cached[index] != fresh[index]) {
+                return index;
+            }
+        }
+        return limit;
     }
 
     private static void changeTaskPriority(ChunkMap chunkMap, ChunkHolder holder, int targetPriority) {
@@ -2159,6 +2235,8 @@ public final class CruiseChunkSendScheduler {
     private static final class PlayerState {
         private final ChunkMap chunkMap;
         private RoutePath priorityPath = RoutePath.empty();
+        /** Once this session's first preload has been allowed; never revoked while the navigation runs. */
+        private boolean preloadUnlocked;
         private final LinkedHashSet<Long> sentChunks = new LinkedHashSet<>();
         private final Map<Long, Long> acknowledgedHashes = new HashMap<>();
         private final Map<Long, Long> pendingHashes = new HashMap<>();
@@ -2186,6 +2264,49 @@ public final class CruiseChunkSendScheduler {
 
         private PlayerState(ChunkMap chunkMap) {
             this.chunkMap = chunkMap;
+        }
+
+        /**
+         * Opens the corridor once per navigation session: a straight leg the first time the aircraft points
+         * within thirty degrees of the target, an L leg as soon as the leg is an L leg at all.
+         *
+         * <p>Latched on purpose. This gate is an extra optimisation that only saves the cost of building a
+         * corridor nobody is flying along, so it may delay the preload but must never be able to take it
+         * away: once open, the session runs exactly like the ungated build, and a verdict that turns out to
+         * be wrong only costs the delay. A gate that could close again would be defence the aircraft does
+         * not need and could leave a flight without its corridor.
+         *
+         * <p>An L leg needs no heading test: its corridor is fixed geometry (position -> corner -> final
+         * centre line) and is ready as soon as the leg is. Only the straight legs, whose load range is just
+         * the area ahead of the nose, wait for the nose to point down the route.
+         */
+        private boolean isPreloadUnlocked(NavigationContext navigation) {
+            if (preloadUnlocked) {
+                return true;
+            }
+            CruiseRoute route = navigation.route();
+            double x = navigation.anchorX();
+            double z = navigation.anchorZ();
+            boolean lLeg = route.shouldUseLShaped(x, z);
+            if (lLeg) {
+                preloadUnlocked = true;
+            } else {
+                CruiseRoute.Waypoint target = route.getNavigationTarget(x, z);
+                if (target != null && Math.abs(Mth.wrapDegrees(navigation.vehicle().getYRot()
+                        - yawTo(target.x() + 0.5d - x, target.z() + 0.5d - z))) < PRELOAD_ALIGN_DEGREES) {
+                    preloadUnlocked = true;
+                }
+            }
+            if (preloadUnlocked) {
+                CruiseDebug.info(ImmersiveAircraftCruise.LOGGER,
+                        "[CruiseChunks] preload unlocked: vehicleId={}, lLeg={}",
+                        navigation.vehicle().getId(), lLeg);
+            }
+            return preloadUnlocked;
+        }
+
+        private static float yawTo(double dx, double dz) {
+            return (float) (Mth.atan2(-dx, dz) * 180.0d / Math.PI);
         }
 
         private void refreshPriorityPath(NavigationContext navigation) {
@@ -2232,6 +2353,7 @@ public final class CruiseChunkSendScheduler {
         }
 
         private void disableRouteCache(ServerPlayer player) {
+            preloadUnlocked = false;
             if (routeCacheEnabled) {
                 int viewDistance = ((ChunkMapInvoker) chunkMap).iacruise$getViewDistance();
                 player.connection.send(new ClientboundSetChunkCacheRadiusPacket(viewDistance));
@@ -2309,8 +2431,16 @@ public final class CruiseChunkSendScheduler {
             // Block changes invalidate the server cache, but replacing a full client chunk on
             // every change causes a resend/render storm. A missing/evicted ACK clears these
             // entries and requests one fresh full snapshot.
+            boolean fromCache = CruiseChunkPayloadCache.get(player.serverLevel()).get(chunkKey) != null;
             CruiseChunkPayloadCache.Snapshot snapshot = prepareRouteChunk(this, player, chunk);
             long hash = snapshot.hash();
+            CruiseDebug.info(ImmersiveAircraftCruise.LOGGER,
+                    "[CruiseSend] chunk={}/{}, source={}, hash={}, bytes={}, chunkUnsaved={}",
+                    chunk.getPos().x, chunk.getPos().z, fromCache ? "cache" : "fresh", hash,
+                    snapshot.compressedPayload().length, chunk.isUnsaved());
+            if (fromCache) {
+                probeCachedSnapshot(this, player.serverLevel(), chunk, snapshot, serverTick);
+            }
             Long acknowledged = acknowledgedHashes.get(chunkKey);
             if (acknowledged != null && acknowledged == hash) {
                 return 0;
@@ -2346,13 +2476,11 @@ public final class CruiseChunkSendScheduler {
             pendingSentTicks.put(chunkKey, serverTick);
             sentChunks.add(chunkKey);
             routePacketsSent++;
-            if (sentBatch != null) {
-                if (sentBatch.length() > 0) {
-                    sentBatch.append(',');
-                }
-                sentBatch.append(ChunkPos.getX(chunkKey)).append('/').append(ChunkPos.getZ(chunkKey))
-                        .append(payload.length == 0 ? "[hash]" : "[payload=" + payload.length + "]");
+            if (sentBatch.length() > 0) {
+                sentBatch.append(',');
             }
+            sentBatch.append(ChunkPos.getX(chunkKey)).append('/').append(ChunkPos.getZ(chunkKey))
+                    .append(payload.length == 0 ? "[hash]" : "[payload=" + payload.length + "]");
             return 1;
         }
 
