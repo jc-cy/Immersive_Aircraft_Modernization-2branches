@@ -1,64 +1,48 @@
 package com.g1739.immersiveaircraftcruise.cruise;
 
-import com.g1739.immersiveaircraftcruise.ImmersiveAircraftCruise;
-import net.minecraft.nbt.CompoundTag;
 import net.minecraft.server.level.ServerLevel;
-import net.minecraft.world.level.saveddata.SavedData;
 
+import java.nio.charset.StandardCharsets;
+import java.util.HashMap;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.UUID;
 
-public final class CruiseChunkPayloadCache extends SavedData {
-    private static final String DATA_NAME = "immersive_aircraft_cruise_route_cache";
+/**
+ * Server-side route chunk payloads, kept for the running session only.
+ *
+ * <p>The cache exists to spare the server a fresh serialisation and compression per viewer and to keep
+ * the client snapshot stable while a chunk stays in the corridor. It is deliberately not persisted: a
+ * snapshot is only trustworthy while the session that built it is the one serving it. Writing it to disk
+ * made the server keep serving chunks the world no longer contained - seasonal TFC blocks removed after
+ * the snapshot was taken never reached the block-change hook - which showed up in game as blocks that
+ * vanished on relog.</p>
+ */
+public final class CruiseChunkPayloadCache {
     private static final int MAX_SNAPSHOTS = 1024;
-    private static final int MAX_COMPRESSED_PAYLOAD = 4 * 1024 * 1024;
-    private static final String NAMESPACE_KEY = "Namespace";
-    private static final String CHUNKS_KEY = "Chunks";
+    private static final Map<ServerLevel, CruiseChunkPayloadCache> LEVELS = new HashMap<>();
 
     private final String namespace;
-    private final Map<Long, Snapshot> snapshots;
+    private final Map<Long, Snapshot> snapshots = new LinkedHashMap<>(16, 0.75f, true);
 
-    private CruiseChunkPayloadCache(String namespace, Map<Long, Snapshot> snapshots) {
+    private CruiseChunkPayloadCache(String namespace) {
         this.namespace = namespace;
-        this.snapshots = snapshots;
     }
 
     public static CruiseChunkPayloadCache get(ServerLevel level) {
-        return level.getDataStorage().computeIfAbsent(
-                CruiseChunkPayloadCache::load,
-                () -> new CruiseChunkPayloadCache(UUID.randomUUID().toString().replace("-", ""),
-                        new LinkedHashMap<>(16, 0.75f, true)),
-                DATA_NAME);
+        return LEVELS.computeIfAbsent(level, key -> new CruiseChunkPayloadCache(namespaceFor(key)));
     }
 
-    private static CruiseChunkPayloadCache load(CompoundTag tag) {
-        Map<Long, Snapshot> snapshots = new LinkedHashMap<>(16, 0.75f, true);
-        CompoundTag chunks = tag.getCompound(CHUNKS_KEY);
-        for (String key : chunks.getAllKeys()) {
-            try {
-                CompoundTag entry = chunks.getCompound(key);
-                byte[] payload = entry.getByteArray("Payload");
-                if (payload.length > MAX_COMPRESSED_PAYLOAD) {
-                    ImmersiveAircraftCruise.LOGGER.warn(
-                            "[CruiseChunks][Server] oversized saved route payload skipped: key={}, bytes={}",
-                            key, payload.length);
-                    continue;
-                }
-                snapshots.put(Long.parseLong(key), new Snapshot(entry.getLong("Hash"), payload));
-            } catch (NumberFormatException exception) {
-                // A damaged SavedData entry must not prevent the server from starting.
-                ImmersiveAircraftCruise.LOGGER.warn(
-                        "[CruiseChunks][Server] invalid saved route cache key skipped: {}", key, exception);
-            }
-        }
-        String namespace = tag.getString(NAMESPACE_KEY);
-        if (namespace.isEmpty()) {
-            namespace = UUID.randomUUID().toString().replace("-", "");
-        }
-        trim(snapshots);
-        return new CruiseChunkPayloadCache(namespace, snapshots);
+    /** Every session rebuilds its payloads from the live chunk, so nothing carries across a restart. */
+    public static void clearAll() {
+        LEVELS.clear();
+    }
+
+    /** Stable per world, so the client keeps one route cache directory instead of one per session. */
+    private static String namespaceFor(ServerLevel level) {
+        String key = level.getServer().getWorldData().getLevelName() + '|' + level.dimension().location();
+        return UUID.nameUUIDFromBytes(key.getBytes(StandardCharsets.UTF_8)).toString().replace("-", "");
     }
 
     public String namespace() {
@@ -70,37 +54,18 @@ public final class CruiseChunkPayloadCache extends SavedData {
     }
 
     public void put(long chunkKey, Snapshot snapshot) {
-        Snapshot previous = snapshots.put(chunkKey, snapshot);
-        if (previous == null || previous.hash() != snapshot.hash()) {
-            setDirty();
-        }
-        trim(snapshots);
+        snapshots.put(chunkKey, snapshot);
+        trim();
     }
 
     public void invalidate(long chunkKey) {
-        if (snapshots.remove(chunkKey) != null) {
-            setDirty();
-        }
-    }
-
-    @Override
-    public CompoundTag save(CompoundTag tag) {
-        tag.putString(NAMESPACE_KEY, namespace);
-        CompoundTag chunks = new CompoundTag();
-        for (Map.Entry<Long, Snapshot> entry : snapshots.entrySet()) {
-            CompoundTag snapshot = new CompoundTag();
-            snapshot.putLong("Hash", entry.getValue().hash());
-            snapshot.putByteArray("Payload", entry.getValue().compressedPayload());
-            chunks.put(Long.toString(entry.getKey()), snapshot);
-        }
-        tag.put(CHUNKS_KEY, chunks);
-        return tag;
+        snapshots.remove(chunkKey);
     }
 
     public record Snapshot(long hash, byte[] compressedPayload) {
     }
 
-    private static void trim(Map<Long, Snapshot> snapshots) {
+    private void trim() {
         while (snapshots.size() > MAX_SNAPSHOTS) {
             Iterator<Long> iterator = snapshots.keySet().iterator();
             iterator.next();

@@ -15,6 +15,7 @@
     "TrackedEntityResync",
     "ServerEntityBroadcast",
     "EngineVehicleMixin",
+    "VehicleEntityAccessor",
     "EngineVehicleAccessor",
     "ServerLevelAccessor",
     "VehicleEntityMixin",

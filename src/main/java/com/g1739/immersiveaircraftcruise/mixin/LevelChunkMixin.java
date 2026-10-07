@@ -13,7 +13,7 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 
 @Mixin(LevelChunk.class)
 public abstract class LevelChunkMixin {
-    @Inject(method = "setBlockState", at = @At("TAIL"))
+    @Inject(method = "setBlockState", at = @At("RETURN"))
     private void iacruise$invalidateRoutePayload(BlockPos pos, BlockState state, boolean moved,
                                                    CallbackInfoReturnable<BlockState> callback) {
         Level level = ((LevelChunk) (Object) this).getLevel();

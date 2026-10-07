@@ -30,10 +30,14 @@ import net.minecraft.world.level.chunk.LevelChunk;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.phys.Vec3;
 
 import java.util.List;
 import java.util.LinkedHashMap;
+import java.util.Locale;
 import java.util.Map;
+import java.lang.reflect.Field;
+import java.lang.reflect.Modifier;
 import java.util.Queue;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.ExecutorService;
@@ -49,14 +53,28 @@ public final class ClientPacketHandlers {
     private static final int ROUTE_CLIENT_APPLY_INTERVAL_TICKS = 1;
     /** The route path reaches 50 chunks ahead and is three chunks wide. */
     private static final int ROUTE_CLIENT_CACHE_RADIUS = 52;
-    /** Match the server in-flight window so a slow client cannot grow an unbounded queue. */
-    private static final int MAX_PENDING_ROUTE_CHUNKS = 32;
+    /**
+     * The receive buffer, and the only number that has to stay clear of the server's in-flight window
+     * ({@code CruiseChunkSendScheduler#ROUTE_PACKET_WINDOW}). The window is the flow control - the server never
+     * has more payloads unacknowledged than that - so this buffer only has to hold those plus the payload the
+     * decode thread is working on. Sized strictly above the window, an overflow cannot happen: drops were never
+     * the throttle, the per-tick apply rate is.
+     */
+    private static final int MAX_PENDING_ROUTE_CHUNKS = 64;
     /** Entity spawn and route-state packets may cross; retain only a bounded, short-lived latest state. */
     private static final int MAX_PENDING_ROUTE_STATES = 32;
     private static final long PENDING_ROUTE_STATE_TTL_TICKS = 200L;
     private static final Queue<QueuedCruiseChunk> PENDING_ROUTE_CHUNKS =
             new ArrayBlockingQueue<>(MAX_PENDING_ROUTE_CHUNKS);
     private static final AtomicInteger PENDING_ROUTE_COUNT = new AtomicInteger();
+    /** Diagnostic tallies drained once per second by {@link #logStreamThroughput()}. */
+    private static int streamLogTick;
+    private static int streamApplied;
+    private static int streamReused;
+    private static int streamRejected;
+    private static int streamMiss;
+    private static int streamQueueFull;
+    private static int streamStaleActive;
     private static final AtomicLong ROUTE_SESSION = new AtomicLong();
     private static final Map<Integer, PendingRouteState> PENDING_ROUTE_STATES = new LinkedHashMap<>();
     private static final Map<Integer, PendingAccelerationPermit> PENDING_ACCELERATION_PERMITS = new LinkedHashMap<>();
@@ -114,6 +132,7 @@ public final class ClientPacketHandlers {
         long session = ROUTE_SESSION.get();
         if (PENDING_ROUTE_COUNT.incrementAndGet() > MAX_PENDING_ROUTE_CHUNKS) {
             PENDING_ROUTE_COUNT.decrementAndGet();
+            streamQueueFull++;
             CruiseDebug.debug(ImmersiveAircraftCruise.LOGGER,
                     "[CruiseChunks][Client] route packet queue full; leaving packet unacknowledged: "
                             + "chunk={}/{}, hash={}, queueLimit={}",
@@ -199,11 +218,12 @@ public final class ClientPacketHandlers {
         for (int processed = 0; processed < ROUTE_CHUNKS_PER_CLIENT_TICK; processed++) {
             QueuedCruiseChunk queued = PENDING_ROUTE_CHUNKS.poll();
             if (queued == null) {
-                return;
+                break;
             }
             PENDING_ROUTE_COUNT.decrementAndGet();
             receiveCruiseChunk(queued);
         }
+        logStreamThroughput();
     }
 
     public static void openCruiseScreen(int entityId, CruiseRoute route, boolean readOnly,
@@ -298,6 +318,11 @@ public final class ClientPacketHandlers {
             CruiseRoute previous = access.iacruise$getRoute();
             CruiseRoute synced = route.copy();
             CruiseController.reconcileRouteDefinitionChange((VehicleEntity) entity, previous, synced);
+            CruiseDebug.debug(ImmersiveAircraftCruise.LOGGER,
+                    "[CruiseL][Client] route sync applied: vehicleId={}, stage={} -> {}, lLine={} -> {}",
+                    entityId, previous == null ? -1 : previous.getLoadingStage(), synced.getLoadingStage(),
+                    previous == null ? null : previous.getLFirstLineCoordinate(),
+                    synced.getLFirstLineCoordinate());
             access.iacruise$setRoute(synced);
             if (!synced.isEnabled() || !synced.hasTarget()) {
                 CruiseHud.invalidateFlightTime(entityId);
@@ -745,6 +770,7 @@ public final class ClientPacketHandlers {
         boolean liveBefore = liveChunkBefore != null && !(liveChunkBefore instanceof EmptyLevelChunk);
         boolean activeBefore = recordedActiveBefore && liveBefore;
         if (recordedActiveBefore && !liveBefore) {
+            streamStaleActive++;
             CruiseRouteCache.deactivate(packet.x(), packet.z(), packet.hash());
             ImmersiveAircraftCruise.LOGGER.warn(
                     "[CruiseChunks][Client] stale active route chunk removed: seq={}, chunk={}/{}, hash={}, "
@@ -765,6 +791,7 @@ public final class ClientPacketHandlers {
                 ? CruiseRouteCache.payload(packet.x(), packet.z(), packet.hash())
                 : packet.compressedPayload();
         if (compressed == null) {
+            streamMiss++;
             ImmersiveAircraftCruise.LOGGER.warn(
                     "[CruiseChunks][Client] route packet cache miss: seq={}, x={}, z={}, hash={}",
                     sequence, packet.x(), packet.z(), packet.hash());
@@ -777,6 +804,11 @@ public final class ClientPacketHandlers {
                 packet.compressedPayload().length == 0 ? "disk" : "network",
                 activeBefore);
         if (!activeBefore) {
+            CruiseDebug.info(ImmersiveAircraftCruise.LOGGER,
+                    "[CruiseApply] overwrite: chunk={}/{}, recordedHash={}, incomingHash={}, liveBefore={}, "
+                            + "recordedActive={}",
+                    packet.x(), packet.z(), CruiseRouteCache.activeHash(packet.x(), packet.z()), packet.hash(),
+                    liveBefore, recordedActiveBefore);
             try {
                 if (queued.decodeFailure() != null) {
                     throw queued.decodeFailure();
@@ -796,6 +828,7 @@ public final class ClientPacketHandlers {
                 }
                 decoded.handle(minecraft.getConnection());
             } catch (RuntimeException exception) {
+                streamRejected++;
                 ImmersiveAircraftCruise.LOGGER.warn(
                         "[CruiseChunks][Client] route payload rejected: seq={}, chunk={}/{}, hash={}",
                         sequence, packet.x(), packet.z(), packet.hash(), exception);
@@ -806,6 +839,7 @@ public final class ClientPacketHandlers {
             LevelChunk chunk = minecraft.level.getChunkSource().getChunk(
                     packet.x(), packet.z(), ChunkStatus.FULL, false);
             if (chunk == null || chunk instanceof EmptyLevelChunk) {
+                streamRejected++;
                 ImmersiveAircraftCruise.LOGGER.warn(
                         "[CruiseChunks][Client] route packet rejected by ClientChunkCache: x={}, z={}, hash={}, loadedChunks={}",
                         packet.x(), packet.z(), packet.hash(),
@@ -813,6 +847,7 @@ public final class ClientPacketHandlers {
                 CruiseRouteCache.reject(packet.x(), packet.z(), packet.hash());
                 return;
             }
+            streamApplied++;
             EmbeddiumRenderBridge.markChunkVisible(packet.x(), packet.z());
             ClientLevel clientLevel = minecraft.level;
             clientLevel.queueLightUpdate(() -> EmbeddiumRenderBridge.markLightReady(
@@ -826,12 +861,132 @@ public final class ClientPacketHandlers {
                     sequence, packet.x(), packet.z(), packet.hash(),
                     minecraft.level.getChunkSource().getLoadedChunksCount());
         } else {
+            streamReused++;
             CruiseDebug.debug(ImmersiveAircraftCruise.LOGGER,
                     "[CruiseChunks][Client] route packet reused active chunk: seq={}, x={}, z={}, hash={}, loadedChunks={}",
                     sequence, packet.x(), packet.z(), packet.hash(),
                     minecraft.level.getChunkSource().getLoadedChunksCount());
         }
         CruiseRouteCache.acknowledge(packet.x(), packet.z(), packet.hash());
+    }
+
+    /**
+     * Per-second route stream tally. It shows whether the client keeps up with the corridor and whether the
+     * render bridge is building sections for chunks Embeddium has not tracked yet, which is the pair of
+     * signals needed to tell a client render problem apart from a payload supply problem.
+     */
+    private static void logStreamThroughput() {
+        if (++streamLogTick < 20) {
+            return;
+        }
+        streamLogTick = 0;
+        logRiddenVehicle();
+        int queued = PENDING_ROUTE_COUNT.get();
+        if (queued == 0 && streamApplied == 0 && streamReused == 0 && streamRejected == 0
+                && streamMiss == 0 && streamQueueFull == 0 && streamStaleActive == 0) {
+            EmbeddiumRenderBridge.logSummary();
+            return;
+        }
+        Minecraft minecraft = Minecraft.getInstance();
+        int loadedChunks = minecraft.level == null
+                ? -1
+                : minecraft.level.getChunkSource().getLoadedChunksCount();
+        CruiseDebug.info(ImmersiveAircraftCruise.LOGGER,
+                "[CruiseStream] queued={}, applied={}, reused={}, rejected={}, cacheMiss={}, queueFull={}, "
+                        + "staleActive={}, loadedChunks={}, cacheRadius={}, cacheCenter={}/{}, speed={}",
+                queued, streamApplied, streamReused, streamRejected, streamMiss, streamQueueFull, streamStaleActive,
+                loadedChunks, CruiseClientCacheView.radius(), CruiseClientCacheView.centerX(),
+                CruiseClientCacheView.centerZ(),
+                String.format(Locale.ROOT, "%.3f", localHorizontalSpeed()));
+        streamApplied = 0;
+        streamReused = 0;
+        streamRejected = 0;
+        streamMiss = 0;
+        streamQueueFull = 0;
+        streamStaleActive = 0;
+        EmbeddiumRenderBridge.logSummary();
+    }
+
+    /** Horizontal speed of whatever the local player is riding, in blocks per tick. */
+    private static double localHorizontalSpeed() {
+        Minecraft minecraft = Minecraft.getInstance();
+        if (minecraft.player == null) {
+            return 0.0d;
+        }
+        Vec3 velocity = minecraft.player.getRootVehicle().getDeltaMovement();
+        return Math.sqrt(velocity.x * velocity.x + velocity.z * velocity.z);
+    }
+
+    private static int dumpedVehicleId = Integer.MIN_VALUE;
+
+    /**
+     * Per-second identity of whatever the local player is riding. Every route decision is taken against this
+     * object, so an addon aircraft that sits differently (seat offset, chunk, tracking) shows up here first.
+     * The first sighting of a vehicle also dumps its own fields once, which is the only way to see what an
+     * addon entity is doing internally without reading its source.
+     */
+    private static void logRiddenVehicle() {
+        Minecraft minecraft = Minecraft.getInstance();
+        if (minecraft.player == null) {
+            return;
+        }
+        Entity root = minecraft.player.getRootVehicle();
+        if (!(root instanceof VehicleEntity vehicle)) {
+            return;
+        }
+        Vec3 velocity = vehicle.getDeltaMovement();
+        CruiseDebug.info(ImmersiveAircraftCruise.LOGGER,
+                "[CruiseVehicle] class={}, type={}, id={}, pos={}, chunk={}, playerChunk={}, velocity={}, "
+                        + "onGround={}, alwaysTicking={}, passengers={}, bb={}x{}",
+                vehicle.getClass().getName(),
+                net.minecraft.core.registries.BuiltInRegistries.ENTITY_TYPE.getKey(vehicle.getType()),
+                vehicle.getId(), vector(vehicle.position()), vehicle.chunkPosition(),
+                minecraft.player.chunkPosition(), vector(velocity), vehicle.onGround(),
+                vehicle.isAlwaysTicking(), vehicle.getPassengers().size(),
+                String.format(Locale.ROOT, "%.2f", vehicle.getBbWidth()),
+                String.format(Locale.ROOT, "%.2f", vehicle.getBbHeight()));
+        if (dumpedVehicleId != vehicle.getId()) {
+            dumpedVehicleId = vehicle.getId();
+            dumpVehicleFields(vehicle);
+        }
+    }
+
+    /** One-shot reflection dump of the ridden vehicle's own fields, for diagnosing addon aircraft. */
+    private static void dumpVehicleFields(Object vehicle) {
+        int dumped = 0;
+        for (Class<?> type = vehicle.getClass(); type != null && type != Object.class; type = type.getSuperclass()) {
+            for (Field field : type.getDeclaredFields()) {
+                if (dumped >= 70 || Modifier.isStatic(field.getModifiers()) || field.isSynthetic()) {
+                    continue;
+                }
+                try {
+                    field.setAccessible(true);
+                    CruiseDebug.info(ImmersiveAircraftCruise.LOGGER, "[CruiseVehicle][Field] {}.{} = {}",
+                            type.getSimpleName(), field.getName(), describeValue(field.get(vehicle)));
+                    dumped++;
+                } catch (Throwable ignored) {
+                    // An inaccessible field must not cut the dump short.
+                }
+            }
+        }
+        CruiseDebug.info(ImmersiveAircraftCruise.LOGGER,
+                "[CruiseVehicle][Field] dumped {} fields of {}", dumped, vehicle.getClass().getName());
+    }
+
+    private static String describeValue(Object value) {
+        if (value == null) {
+            return "null";
+        }
+        if (value.getClass().isArray()) {
+            return value.getClass().getComponentType().getSimpleName() + "["
+                    + java.lang.reflect.Array.getLength(value) + "]";
+        }
+        String text = String.valueOf(value);
+        return text.length() > 120 ? text.substring(0, 120) + "..." : text;
+    }
+
+    private static String vector(Vec3 value) {
+        return String.format(Locale.ROOT, "%.2f/%.2f/%.2f", value.x, value.y, value.z);
     }
 
     private record QueuedCruiseChunk(CruiseRouteChunkPacket packet,
