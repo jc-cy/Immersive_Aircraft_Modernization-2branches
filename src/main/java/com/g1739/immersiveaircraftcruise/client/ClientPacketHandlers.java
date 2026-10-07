@@ -39,6 +39,7 @@ import java.util.Map;
 import java.lang.reflect.Field;
 import java.lang.reflect.Modifier;
 import java.util.Queue;
+import java.util.Iterator;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -140,6 +141,7 @@ public final class ClientPacketHandlers {
             return;
         }
         if (packet.compressedPayload().length == 0) {
+            dropSupersededQueuedChunk(packet.x(), packet.z());
             if (!PENDING_ROUTE_CHUNKS.offer(new QueuedCruiseChunk(packet, null, null, session))) {
                 PENDING_ROUTE_COUNT.decrementAndGet();
             }
@@ -172,9 +174,35 @@ public final class ClientPacketHandlers {
         } catch (RuntimeException exception) {
             failure = exception;
         }
+        dropSupersededQueuedChunk(packet.x(), packet.z());
         if (ROUTE_SESSION.get() != session
                 || !PENDING_ROUTE_CHUNKS.offer(new QueuedCruiseChunk(packet, decoded, failure, session))) {
             PENDING_ROUTE_COUNT.decrementAndGet();
+        }
+    }
+
+    /**
+     * Keeps one queued payload per chunk: a chunk that is sent again (same position, newer snapshot) replaces
+     * the copy still waiting here instead of adding a second slot, so duplicates cannot fill the receive
+     * buffer and the buffer stays the size of the server's in-flight window. The payload that lands is the one
+     * this call kept, so a real update is never held back - only a superseded copy is discarded.
+     */
+    private static void dropSupersededQueuedChunk(int x, int z) {
+        int removed = 0;
+        Iterator<QueuedCruiseChunk> iterator = PENDING_ROUTE_CHUNKS.iterator();
+        while (iterator.hasNext()) {
+            QueuedCruiseChunk queued = iterator.next();
+            if (queued.packet().x() == x && queued.packet().z() == z) {
+                iterator.remove();
+                removed++;
+            }
+        }
+        if (removed > 0) {
+            PENDING_ROUTE_COUNT.addAndGet(-removed);
+            CruiseDebug.debug(ImmersiveAircraftCruise.LOGGER,
+                    "[CruiseChunks][Client] superseded queued route chunk dropped: chunk={}/{}, removed={}, "
+                            + "queued={}",
+                    x, z, removed, PENDING_ROUTE_COUNT.get());
         }
     }
 
